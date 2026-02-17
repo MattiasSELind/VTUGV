@@ -1,72 +1,41 @@
-# Self-Supervised 4D Occupancy Projection Pipeline
+# Multi-View Point Cloud Fusion Implementation Plan
 
-Build a complete self-supervised training pipeline inside [new_notebook.ipynb](file:///c:/Users/maxlars/UGV_research_pipeline/new_notebook.ipynb) that back-projects RGB frames into 3D+time (4D) using stereo depth and TartanVO odometry, then trains a QueryOcc-style network via photometric consistency — all without manual labels.
+## Goal Description
+Extend the current pipeline to support a **multi-view dataset** (e.g., Front + Back cameras). This upgrades the system from a single-camera "2.5D" approach to a **Surround-View** capability, significantly improving the completeness and resolution of the fused point cloud map.
 
-## Data Inventory
-
-| Data | Source | Count |
-|---|---|---|
-| Color frames | `extracted/images/multisense_left_image_rect_color/` | 77 frames (1024×544) |
-| Stereo depth | `extracted/depth/depth_*.npy` | 80 maps (float32, meters) |
-| Image timestamps | `timestamps.csv` per camera | frame ↔ ROS timestamp |
-| TartanVO odometry | `extracted/odometry/tartanvo_odom.csv` | 67 poses (pos xyz + quat xyzw) |
-| Camera intrinsics | `extracted/calibration/multisense_intrinsics.txt` | K, P, D, R matrices |
-| Extrinsics | `extracted/calibration/extrinsics.yaml` | vehicle↔camera transforms |
-
+## Significant Changes
 > [!IMPORTANT]
-> **TartanVO odometry** provides direct 6-DOF poses (position + quaternion), so we use these instead of double-integrating raw IMU (which drifts rapidly). The IMU data can serve as a secondary reference.
+> **Depth Estimation Required**: Unlike the previous dataset, the new data likely does not come with pre-computed depth maps. We must integrate a Monocular Depth Estimation model (e.g., **Depth Anything V2** or **ZoeDepth**) to generate depth for each camera view.
 
 ## Proposed Changes
 
-Since the user cannot edit `.ipynb` files directly via tool, I will create a **standalone Python script** `pipeline_4d.py` that mirrors the notebook sections. The user can then copy cells into the notebook, or run directly.
+### 1. Depth Estimation Integration (`estimate_depth.py`)
+- **Action**: Create a new script to generate depth maps for *all* input images.
+- **Model**: Use **Depth Anything V2** (Small/Base) for high-quality, metric-relative depth.
+- **Output**: Save as [.npy](file:///c:/Users/maxlars/Documents/GitHub/VTUGV/data/depth/depth_000087.npy) in `data/depth/{camera_name}/`.
 
-### Pipeline Script
+### 2. Multi-View Processing Updates
+- **[segment_images.py](file:///c:/Users/maxlars/Documents/GitHub/VTUGV/segment_images.py)** & **[extract_features.py](file:///c:/Users/maxlars/Documents/GitHub/VTUGV/extract_features.py)**:
+    - Modify to iterate over **all camera subdirectories** (e.g., `data/images/front`, `data/images/back`) instead of a single hardcoded path.
+    - Output to corresponding `data/{task}/{camera_name}` directories.
 
-#### [NEW] [pipeline_4d.py](file:///c:/Users/maxlars/UGV_research_pipeline/pipeline_4d.py)
+### 3. Intrinsics & Extrinsics Management
+- **Intrinsics**: Need separate intrinsics ($K_{front}$, $K_{back}$) for each camera.
+- **Extrinsics**: Need transforms for each camera relative to the vehicle ($T_{front \to vehicle}$, $T_{back \to vehicle}$).
+- **Plan**: Update `data/calibration/` to support multiple config files or a unified `rig.yaml`.
 
-Implements all 6 notebook sections as clearly delimited sections:
-
-**Section 0 — Imports**: torch, numpy, cv2, scipy.spatial.transform, matplotlib
-
-**Section 1 — Configuration**:
-- Paths to images, depth, odometry, calibration
-- Voxel grid parameters (X/Y/Z range, resolution)
-- Training hyperparameters (lr, epochs, batch size)
-
-**Section 2 — Data Calibration**:
-- Parse `multisense_intrinsics.txt` → K matrix (3×3), projection P (3×4)
-- Parse `extrinsics.yaml` → T_vehicle_to_camera (4×4)
-- Parse `tartanvo_odom.csv` → per-frame T_vehicle_to_world (4×4)
-- Compose full chain: `T_cam_to_world = T_v2w @ inv(T_c2v)`
-- Match odometry poses to image timestamps via nearest-timestamp lookup
-
-**Section 3 — Dataset & DataLoader**:
-- `TartanDrive4DDataset(torch.utils.data.Dataset)`:
-  - Returns triplets: `(img_prev, img_curr, img_next, depth_curr, T_prev, T_curr, T_next, K)`
-  - Handles timestamp matching between images and odometry
-  - Normalizes images to [0,1]
-
-**Section 4 — Projection (the core 4D pipeline)**:
-- `backproject_depth_to_3d(depth, K_inv)` → 3D point cloud in camera frame
-- `transform_points(pts_3d, T_src_to_tgt)` → transform to another frame
-- `project_3d_to_2d(pts_3d, K)` → project back to pixel coordinates
-- `warp_image(src_img, depth_tgt, K, T_tgt_to_src)` → full warping pipeline
-- Compose relative transform: `T_rel = T_tgt_inv @ T_src`
-- Grid sample to synthesize view from neighboring frame
-
-**Section 5 — Loss Functions & Training Loop**:
-- `ssim_loss(pred, target)` — structural similarity (window-based)
-- `photometric_loss(pred, target)` — weighted combination: `0.85 * SSIM + 0.15 * L1`
-- `smoothness_loss(depth, image)` — edge-aware depth smoothness
-- Training loop with Adam optimizer
-- Visualization of warped images and loss curves
+### 4. Upgrade Fusion Script (`fuse_pointclouds.py`)
+- **Logic**:
+    - Iterate through synchronized timestamps.
+    - For each timestamp, load **Front** data AND **Back** data.
+    - Generate $P_{front}$ (using $K_{front}, D_{front}$).
+    - Generate $P_{back}$ (using $K_{back}, D_{back}$).
+    - Transform both to Vehicle frame:
+        - $P_{veh} = T_{front \to veh} \times P_{front}$
+        - $P_{veh} = T_{back \to veh} \times P_{back}$
+    - Transform to World using Odom.
+    - Fuse into global map.
 
 ## Verification Plan
-
-### Automated / Script-Based
-1. **Run the script end-to-end**: `python pipeline_4d.py` — should load data, compute projections, and run at least 1 epoch
-2. **Sanity check outputs**: The script will save a warped image visualization to `extracted/projection_debug/` showing the reprojected frame alongside the target frame
-
-### Manual Verification (for user)
-1. Open the generated visualization images in `extracted/projection_debug/` — warped frames should look roughly like the target frame (not garbled or empty)
-2. Copy sections from `pipeline_4d.py` into `new_notebook.ipynb` cells to run interactively
+1.  **Depth Check**: Visualize generated depth maps (since we don't have ground truth).
+2.  **Overlap Check**: Verify that "Front" and "Back" point clouds align correctly in the fused map (e.g., ground plane is flat, objects don't "ghost").
