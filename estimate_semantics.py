@@ -1,8 +1,8 @@
 """
 estimate_semantics.py
-Run semantic segmentation on Great Outdoors images using SegFormer (HuggingFace).
-Uses ADE20K dataset (150 classes) — suitable for off-road/outdoor scenes.
-Saves per-pixel class index maps as .npy files (uint8) and visualization PNGs.
+Zero-shot semantic segmentation using CLIPSeg with custom off-road labels.
+No dataset-specific training needed — we define our own class labels!
+Saves per-pixel class index maps as .npy (uint8) and visualization PNGs.
 """
 
 import os
@@ -15,7 +15,7 @@ os.environ["HF_HOME"] = os.path.join(os.path.expanduser("~"), "Downloads", "hf_c
 os.makedirs(os.environ["HF_HOME"], exist_ok=True)
 
 import torch
-from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
+from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
 
 # Configuration
 HOME = os.path.expanduser("~")
@@ -28,97 +28,113 @@ CAMERAS = ["front_left", "front_right", "rear_center"]
 # Limit for testing — set to None for full dataset
 LIMIT = 20
 
-# ADE20K 150 class names (index 0-149)
-ADE20K_CLASSES = [
-    "wall", "building", "sky", "floor", "tree",
-    "ceiling", "road", "bed", "windowpane", "grass",
-    "cabinet", "sidewalk", "person", "earth", "door",
-    "table", "mountain", "plant", "curtain", "chair",
-    "car", "water", "painting", "sofa", "shelf",
-    "house", "sea", "mirror", "rug", "field",
-    "armchair", "seat", "fence", "desk", "rock",
-    "wardrobe", "lamp", "bathtub", "railing", "cushion",
-    "base", "box", "column", "signboard", "chest of drawers",
-    "counter", "sand", "sink", "skyscraper", "fireplace",
-    "refrigerator", "grandstand", "path", "stairs", "runway",
-    "case", "pool table", "pillow", "screen door", "stairway",
-    "river", "bridge", "bookcase", "blind", "coffee table",
-    "toilet", "flower", "book", "hill", "bench",
-    "countertop", "stove", "palm", "kitchen island", "computer",
-    "swivel chair", "boat", "bar", "arcade machine", "hovel",
-    "bus", "towel", "light", "truck", "tower",
-    "chandelier", "awning", "streetlight", "booth", "television",
-    "airplane", "dirt track", "apparel", "pole", "land",
-    "bannister", "escalator", "ottoman", "bottle", "buffet",
-    "poster", "stage", "van", "ship", "fountain",
-    "conveyer belt", "canopy", "washer", "plaything", "swimming pool",
-    "stool", "barrel", "basket", "waterfall", "tent",
-    "bag", "minibike", "cradle", "oven", "ball",
-    "food", "step", "tank", "trade name", "microwave",
-    "pot", "animal", "bicycle", "lake", "dishwasher",
-    "screen", "blanket", "sculpture", "hood", "sconce",
-    "vase", "traffic light", "tray", "ashcan", "fan",
-    "pier", "crt screen", "plate", "monitor", "bulletin board",
-    "shower", "radiator", "glass", "clock", "flag",
+# ====================================================================
+# CUSTOM OFF-ROAD CLASS DEFINITIONS
+# Add, remove, or rename these to match your dataset's environment.
+# CLIPSeg uses CLIP text embeddings, so natural language works well.
+# ====================================================================
+CUSTOM_CLASSES = [
+    "dirt road",          # 0  - unpaved driving surface, gravel path
+    "grass",              # 1  - ground-level vegetation, lawn
+    "tree",               # 2  - trees, tree trunks, branches
+    "bush",               # 3  - shrubs, undergrowth, low vegetation
+    "rock",               # 4  - stones, boulders, rocky surface
+    "mud",                # 5  - wet ground, muddy surface
+    "water",              # 6  - puddles, streams, lakes
+    "sky",                # 7  - sky, clouds
+    "vehicle",            # 8  - cars, trucks, ATVs
+    "person",             # 9  - people, pedestrians
+    "building",           # 10 - structures, houses, sheds
+    "fence",              # 11 - fences, barriers, railings
+    "terrain",            # 12 - general undifferentiated ground
 ]
 
-# ADE20K color palette (150 colors — standard visualization)
-# Generated to be visually distinct per class
-def _generate_ade20k_palette():
-    """Generate a deterministic 150-color palette for ADE20K."""
-    palette = np.zeros((150, 3), dtype=np.uint8)
-    for i in range(150):
-        r, g, b = 0, 0, 0
-        idx = i + 1  # 1-indexed for bit extraction
-        for j in range(8):
-            r = r | ((idx >> 0) & 1) << (7 - j)
-            g = g | ((idx >> 1) & 1) << (7 - j)
-            b = b | ((idx >> 2) & 1) << (7 - j)
-            idx >>= 3
-        palette[i] = [r, g, b]
-    return palette
+# Colors for each class (for visualization and 3D point clouds)
+CUSTOM_PALETTE = np.array([
+    [160, 120, 80],    # 0  dirt road  -> brown
+    [124, 252, 0],     # 1  grass      -> lawn green
+    [34, 139, 34],     # 2  tree       -> forest green
+    [0, 180, 0],       # 3  bush       -> green
+    [160, 160, 160],   # 4  rock       -> gray
+    [100, 70, 40],     # 5  mud        -> dark brown
+    [0, 100, 255],     # 6  water      -> blue
+    [135, 206, 250],   # 7  sky        -> light blue
+    [0, 0, 180],       # 8  vehicle    -> dark blue
+    [255, 0, 0],       # 9  person     -> red
+    [70, 70, 70],      # 10 building   -> dark gray
+    [190, 153, 153],   # 11 fence      -> blush
+    [210, 180, 140],   # 12 terrain    -> tan
+], dtype=np.uint8)
 
-ADE20K_PALETTE = _generate_ade20k_palette()
+NUM_CLASSES = len(CUSTOM_CLASSES)
 
-# Override specific classes with more intuitive colors for off-road
-ADE20K_PALETTE[4]  = [34, 139, 34]    # tree -> forest green
-ADE20K_PALETTE[9]  = [124, 252, 0]    # grass -> lawn green
-ADE20K_PALETTE[13] = [139, 90, 43]    # earth -> brown
-ADE20K_PALETTE[6]  = [128, 128, 128]  # road -> gray
-ADE20K_PALETTE[21] = [0, 100, 255]    # water -> blue
-ADE20K_PALETTE[34] = [160, 160, 160]  # rock -> light gray
-ADE20K_PALETTE[17] = [0, 200, 0]      # plant -> green
-ADE20K_PALETTE[46] = [238, 214, 175]  # sand -> tan
-ADE20K_PALETTE[2]  = [135, 206, 250]  # sky -> light blue
-ADE20K_PALETTE[52] = [210, 180, 140]  # path -> tan
-ADE20K_PALETTE[91] = [160, 120, 80]   # dirt track -> brown
-ADE20K_PALETTE[16] = [100, 130, 100]  # mountain -> muted green
-ADE20K_PALETTE[29] = [180, 220, 80]   # field -> yellow-green
-ADE20K_PALETTE[69] = [90, 160, 90]    # hill -> dark green
-ADE20K_PALETTE[12] = [255, 0, 0]      # person -> red
-ADE20K_PALETTE[20] = [0, 0, 180]      # car -> dark blue
-ADE20K_PALETTE[31] = [190, 153, 153]  # fence -> blush
+
+def segment_image(model, processor, image, class_labels, device):
+    """
+    Run CLIPSeg on a single image with the given class labels.
+    Returns (H, W) uint8 array of class indices.
+    """
+    # CLIPSeg expects one text prompt per class
+    inputs = processor(
+        text=class_labels,
+        images=[image] * len(class_labels),
+        return_tensors="pt",
+        padding=True
+    ).to(device)
+    
+    with torch.no_grad():
+        outputs = model(**inputs)
+    
+    # outputs.logits: (num_classes, H_small, W_small)
+    logits = outputs.logits  # (num_classes, H/?, W/?)
+    
+    # Upsample to original image size
+    orig_h, orig_w = image.size[1], image.size[0]
+    
+    if logits.dim() == 2:
+        # Single class case — shouldn't happen but handle
+        logits = logits.unsqueeze(0)
+    
+    # (num_classes, H, W) -> upsample
+    logits_up = torch.nn.functional.interpolate(
+        logits.unsqueeze(0) if logits.dim() == 3 else logits,
+        size=(orig_h, orig_w),
+        mode="bilinear",
+        align_corners=False
+    )
+    
+    # Squeeze batch dim if present
+    if logits_up.dim() == 4:
+        logits_up = logits_up.squeeze(0)  # (num_classes, H, W)
+    
+    # Argmax over classes
+    seg_map = logits_up.argmax(dim=0).cpu().numpy().astype(np.uint8)
+    
+    return seg_map
 
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
-    # SegFormer-b2 on ADE20K — good balance of speed and accuracy
-    # b0 is fastest, b5 is most accurate
-    model_name = "nvidia/segformer-b2-finetuned-ade-512-512"
+    # Load CLIPSeg
+    model_name = "CIDAS/clipseg-rd64-refined"
     print(f"Loading model: {model_name}")
     
     try:
-        processor = SegformerImageProcessor.from_pretrained(model_name)
-        model = SegformerForSemanticSegmentation.from_pretrained(model_name)
+        processor = CLIPSegProcessor.from_pretrained(model_name)
+        model = CLIPSegForImageSegmentation.from_pretrained(model_name)
         model.to(device)
         model.eval()
         print("Model loaded successfully.")
-        print(f"Classes: {len(ADE20K_CLASSES)} (ADE20K)")
     except Exception as e:
         print(f"Failed to load model: {e}")
         return
+    
+    print(f"\nCustom classes ({NUM_CLASSES}):")
+    for i, cls in enumerate(CUSTOM_CLASSES):
+        r, g, b = CUSTOM_PALETTE[i]
+        print(f"  {i:2d}: {cls:20s}  RGB({r:3d},{g:3d},{b:3d})")
     
     # Process each camera
     for cam_name in CAMERAS:
@@ -126,7 +142,7 @@ def main():
         cam_out_dir = os.path.join(OUTPUT_DIR, cam_name)
         
         if not os.path.isdir(cam_in_dir):
-            print(f"Camera folder not found: {cam_in_dir}")
+            print(f"\nCamera folder not found: {cam_in_dir}")
             continue
             
         os.makedirs(cam_out_dir, exist_ok=True)
@@ -150,52 +166,45 @@ def main():
             if os.path.exists(save_path):
                 continue
             
-            print(f"  [{i+1}/{len(img_paths)}] {cam_name}/{basename}")
+            print(f"  [{i+1}/{len(img_paths)}] {cam_name}/{basename}", end="")
             
             try:
                 image = Image.open(img_path).convert("RGB")
-                orig_size = image.size  # (W, H)
                 
-                # Preprocess
-                inputs = processor(images=image, return_tensors="pt").to(device)
-                
-                # Inference
-                with torch.no_grad():
-                    outputs = model(**inputs)
-                
-                # Get class predictions
-                logits = outputs.logits  # (1, 150, H/4, W/4)
-                
-                # Upsample to original image size
-                upsampled = torch.nn.functional.interpolate(
-                    logits,
-                    size=(orig_size[1], orig_size[0]),  # (H, W)
-                    mode="bilinear",
-                    align_corners=False
-                )
-                
-                seg_map = upsampled.argmax(dim=1).squeeze().cpu().numpy().astype(np.uint8)
+                seg_map = segment_image(model, processor, image, CUSTOM_CLASSES, device)
                 
                 # Save class map
                 np.save(save_path, seg_map)
                 
-                # Save visualization
-                vis = ADE20K_PALETTE[seg_map]  # (H, W, 3)
-                Image.fromarray(vis).save(vis_path)
+                # Save visualization (overlay)
+                vis = CUSTOM_PALETTE[seg_map]  # (H, W, 3)
                 
-                # Print detected classes for first image
+                # Blend with original for better visualization
+                orig_arr = np.array(image)
+                if orig_arr.shape[:2] != vis.shape[:2]:
+                    image_resized = image.resize((vis.shape[1], vis.shape[0]))
+                    orig_arr = np.array(image_resized)
+                
+                blended = (0.4 * orig_arr + 0.6 * vis).astype(np.uint8)
+                Image.fromarray(blended).save(vis_path)
+                
+                # Print detected classes for first image per camera
                 if i == 0:
-                    unique_classes = np.unique(seg_map)
-                    print(f"    Detected classes: {[ADE20K_CLASSES[c] for c in unique_classes]}")
+                    unique, counts = np.unique(seg_map, return_counts=True)
+                    total = seg_map.size
+                    print()
+                    for cls_id, count in zip(unique, counts):
+                        pct = 100 * count / total
+                        if pct > 1.0:  # Only show classes > 1%
+                            print(f"      {CUSTOM_CLASSES[cls_id]:20s}: {pct:.1f}%")
+                else:
+                    print(" ✓")
                 
             except Exception as e:
-                print(f"  Error: {e}")
+                print(f" ERROR: {e}")
     
     print("\nSemantic segmentation complete.")
     print(f"Output: {OUTPUT_DIR}")
-    print(f"\nKey off-road classes to look for:")
-    for idx in [4, 9, 13, 6, 21, 34, 17, 46, 91, 29, 52, 69, 16]:
-        print(f"  {idx:3d}: {ADE20K_CLASSES[idx]}")
 
 
 if __name__ == "__main__":

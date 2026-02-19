@@ -19,17 +19,17 @@ from fuse_outdoors import (
     DEFAULT_INTRINSICS
 )
 
-# ---- Import ADE20K classes and palette from estimate_semantics ----
-from estimate_semantics import ADE20K_CLASSES, ADE20K_PALETTE
+# ---- Import custom classes and palette from estimate_semantics ----
+from estimate_semantics import CUSTOM_CLASSES, CUSTOM_PALETTE
 
 # Configuration
 HOME = os.path.expanduser("~")
 SEMANTICS_DIR = os.path.join(HOME, "Downloads", "the_great_outdoors_data_semantics")
 OUTPUT_DIR = os.path.join(HOME, "Downloads", "VTUGV_pointclouds_semantics")
 
-# Classes to EXCLUDE from 3D point cloud (don't make sense in 3D)
-# ADE20K: 2=sky, 5=ceiling
-EXCLUDE_CLASSES = {2, 5}
+# Classes to EXCLUDE from 3D point cloud
+# 7 = sky (doesn't make sense in 3D)
+EXCLUDE_CLASSES = {7}
 
 
 def main():
@@ -183,7 +183,7 @@ def main():
                         continue
                     
                     # Map labels to colors
-                    colors = ADE20K_PALETTE[labels] / 255.0  # (N, 3) float
+                    colors = CUSTOM_PALETTE[labels] / 255.0  # (N, 3) float
                     
                     # Intrinsics
                     if cam in cam_intrinsics:
@@ -237,7 +237,7 @@ def main():
             print(f"  Saved {ply_path} ({len(all_points)} points)")
             print(f"  Class distribution:")
             for cls_id, count in zip(unique, counts):
-                name = ADE20K_CLASSES[cls_id] if cls_id < len(ADE20K_CLASSES) else f"class_{cls_id}"
+                name = CUSTOM_CLASSES[cls_id] if cls_id < len(CUSTOM_CLASSES) else f"class_{cls_id}"
                 pct = 100 * count / len(all_labels)
                 print(f"    {name:20s}: {count:8d} ({pct:.1f}%)")
         else:
