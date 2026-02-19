@@ -182,6 +182,12 @@ def main():
                     if len(z_vals) == 0:
                         continue
                     
+                    # Clamp labels to valid range (safety for stale/mismatched .npy files)
+                    num_classes = len(CUSTOM_PALETTE)
+                    if labels.max() >= num_classes:
+                        print(f"    Warning: clamping out-of-range labels (max={labels.max()}) in {cam}/{basename}")
+                        labels = np.clip(labels, 0, num_classes - 1)
+                    
                     # Map labels to colors
                     colors = CUSTOM_PALETTE[labels] / 255.0  # (N, 3) float
                     

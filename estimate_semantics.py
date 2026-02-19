@@ -30,48 +30,60 @@ LIMIT = 20
 
 # ====================================================================
 # CUSTOM OFF-ROAD CLASS DEFINITIONS
-# Add, remove, or rename these to match your dataset's environment.
-# CLIPSeg uses CLIP text embeddings, so natural language works well.
+# Short names for display + detailed CLIP prompts for better accuracy.
+# CLIPSeg uses CLIP text embeddings — more descriptive = more accurate.
 # ====================================================================
+
+# Short display names (used in output and PLY coloring)
 CUSTOM_CLASSES = [
-    "dirt road",          # 0  - unpaved driving surface, gravel path
-    "grass",              # 1  - ground-level vegetation, lawn
-    "tree",               # 2  - trees, tree trunks, branches
-    "bush",               # 3  - shrubs, undergrowth, low vegetation
-    "rock",               # 4  - stones, boulders, rocky surface
-    "mud",                # 5  - wet ground, muddy surface
-    "water",              # 6  - puddles, streams, lakes
-    "sky",                # 7  - sky, clouds
-    "vehicle",            # 8  - cars, trucks, ATVs
-    "person",             # 9  - people, pedestrians
-    "building",           # 10 - structures, houses, sheds
-    "fence",              # 11 - fences, barriers, railings
-    "terrain",            # 12 - general undifferentiated ground
+    "dirt road",     # 0
+    "grass",         # 1
+    "tree",          # 2
+    "bush",          # 3
+    "rock",          # 4
+    "mud",           # 5
+    "water",         # 6
+    "sky",           # 7
+    "vehicle",       # 8
+    "person",        # 9
+    "building",      # 10
+    "fence",         # 11
+    "terrain",       # 12
 ]
 
-# 0: dirt road       🟤    7: sky          🔵
-# 1: grass           🟢    8: vehicle      🔵
-# 2: tree            🟢    9: person       🔴
-# 3: bush            🟢   10: building     ⬛
-# 4: rock            ⬜   11: fence        ⬜
-# 5: mud             🟤   12: terrain      🟡
-# 6: water           🔵
+# Detailed CLIP prompts (these are what the model actually sees)
+# More descriptive phrases help CLIP distinguish between similar classes
+CLIP_PROMPTS = [
+    "an unpaved dirt road or gravel trail on the ground",          # 0 dirt road
+    "green grass growing on the ground",                           # 1 grass
+    "a tall tree with trunk and branches and leaves",              # 2 tree
+    "a bush or shrub or low undergrowth vegetation",               # 3 bush
+    "a rock or stone or boulder on the ground",                    # 4 rock
+    "wet muddy ground or puddle of mud",                           # 5 mud
+    "a body of water such as a stream or river or puddle",        # 6 water
+    "the sky with clouds above the horizon",                       # 7 sky
+    "a car or truck or vehicle driving on a road",                 # 8 vehicle
+    "a human person standing or walking upright",                  # 9 person
+    "a man-made building or structure or house",                   # 10 building
+    "a fence or railing or barrier",                               # 11 fence
+    "flat bare ground or sandy terrain without vegetation",        # 12 terrain
+]
 
 # Colors for each class (for visualization and 3D point clouds)
 CUSTOM_PALETTE = np.array([
-    [160, 120, 80],    # 0  dirt road  -> brown
-    [124, 252, 0],     # 1  grass      -> lawn green
-    [34, 139, 34],     # 2  tree       -> forest green
-    [0, 180, 0],       # 3  bush       -> green
-    [160, 160, 160],   # 4  rock       -> gray
-    [100, 70, 40],     # 5  mud        -> dark brown
-    [0, 100, 255],     # 6  water      -> blue
-    [135, 206, 250],   # 7  sky        -> light blue
-    [0, 0, 180],       # 8  vehicle    -> dark blue
-    [255, 0, 0],       # 9  person     -> red
-    [70, 70, 70],      # 10 building   -> dark gray
-    [190, 153, 153],   # 11 fence      -> blush
-    [210, 180, 140],   # 12 terrain    -> tan
+    [160, 120, 80],    # 0  dirt road  -> 🟤 brown
+    [124, 252, 0],     # 1  grass      -> 🟢 lawn green
+    [34, 139, 34],     # 2  tree       -> 🌲 forest green
+    [0, 180, 0],       # 3  bush       -> 🟢 green
+    [160, 160, 160],   # 4  rock       -> ⬜ gray
+    [100, 70, 40],     # 5  mud        -> 🟤 dark brown
+    [0, 100, 255],     # 6  water      -> 🔵 blue
+    [135, 206, 250],   # 7  sky        -> 🔵 light blue
+    [0, 0, 180],       # 8  vehicle    -> 🔵 dark blue
+    [255, 0, 0],       # 9  person     -> 🔴 red
+    [70, 70, 70],      # 10 building   -> ⬛ dark gray
+    [190, 153, 153],   # 11 fence      -> ⬜ blush
+    [210, 180, 140],   # 12 terrain    -> 🟡 tan
 ], dtype=np.uint8)
 
 NUM_CLASSES = len(CUSTOM_CLASSES)
@@ -179,7 +191,7 @@ def main():
             try:
                 image = Image.open(img_path).convert("RGB")
                 
-                seg_map = segment_image(model, processor, image, CUSTOM_CLASSES, device)
+                seg_map = segment_image(model, processor, image, CLIP_PROMPTS, device)
                 
                 # Save class map
                 np.save(save_path, seg_map)
