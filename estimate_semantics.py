@@ -49,6 +49,14 @@ CUSTOM_CLASSES = [
     "terrain",            # 12 - general undifferentiated ground
 ]
 
+# 0: dirt road       🟤    7: sky          🔵
+# 1: grass           🟢    8: vehicle      🔵
+# 2: tree            🟢    9: person       🔴
+# 3: bush            🟢   10: building     ⬛
+# 4: rock            ⬜   11: fence        ⬜
+# 5: mud             🟤   12: terrain      🟡
+# 6: water           🔵
+
 # Colors for each class (for visualization and 3D point clouds)
 CUSTOM_PALETTE = np.array([
     [160, 120, 80],    # 0  dirt road  -> brown
