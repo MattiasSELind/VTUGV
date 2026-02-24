@@ -19,22 +19,22 @@ from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
 
 # Configuration
 HOME = os.path.expanduser("~")
-DATASET_DIR = os.path.join(HOME, "Downloads", "the_great_outdoors_data")
+DATASET_DIR = os.path.join(HOME, "Downloads", "Data_Outdoors", "images")
 IMAGE_DIR = DATASET_DIR
 OUTPUT_DIR = os.path.join(HOME, "Downloads", "the_great_outdoors_data_semantics")
 
-CAMERAS = ["front_left", "front_right", "rear_center"]
+CAMERAS = [ "front_right", "rear_center"]
 
 # Limit for testing — set to None for full dataset
-LIMIT = 20
+LIMIT = 7252
+
+# Optimization Configuration
+BATCH_SIZE = 8
+VISUALIZE_FIRST_ONLY = True
 
 # ====================================================================
 # CUSTOM OFF-ROAD CLASS DEFINITIONS
-# Short names for display + detailed CLIP prompts for better accuracy.
-# CLIPSeg uses CLIP text embeddings — more descriptive = more accurate.
 # ====================================================================
-
-# Short display names (used in output and PLY coloring)
 CUSTOM_CLASSES = [
     "dirt road",     # 0
     "grass",         # 1
@@ -51,8 +51,6 @@ CUSTOM_CLASSES = [
     "terrain",       # 12
 ]
 
-# Detailed CLIP prompts (these are what the model actually sees)
-# More descriptive phrases help CLIP distinguish between similar classes
 CLIP_PROMPTS = [
     "an unpaved dirt road or gravel trail on the ground",          # 0 dirt road
     "green grass growing on the ground",                           # 1 grass
@@ -69,7 +67,6 @@ CLIP_PROMPTS = [
     "flat bare ground or sandy terrain without vegetation",        # 12 terrain
 ]
 
-# Colors for each class (for visualization and 3D point clouds)
 CUSTOM_PALETTE = np.array([
     [160, 120, 80],    # 0  dirt road  -> 🟤 brown
     [124, 252, 0],     # 1  grass      -> 🟢 lawn green
@@ -88,16 +85,17 @@ CUSTOM_PALETTE = np.array([
 
 NUM_CLASSES = len(CUSTOM_CLASSES)
 
-
-def segment_image(model, processor, image, class_labels, device):
+def segment_image_batch(model, processor, images, class_labels, device):
     """
-    Run CLIPSeg on a single image with the given class labels.
-    Returns (H, W) uint8 array of class indices.
+    Run CLIPSeg on a batch of images with the given class labels.
+    Returns list of (H, W) uint8 arrays of class indices.
     """
-    # CLIPSeg expects one text prompt per class
+    texts = class_labels * len(images)
+    repeated_images = [img for img in images for _ in range(len(class_labels))]
+    
     inputs = processor(
-        text=class_labels,
-        images=[image] * len(class_labels),
+        text=texts,
+        images=repeated_images,
         return_tensors="pt",
         padding=True
     ).to(device)
@@ -105,39 +103,33 @@ def segment_image(model, processor, image, class_labels, device):
     with torch.no_grad():
         outputs = model(**inputs)
     
-    # outputs.logits: (num_classes, H_small, W_small)
-    logits = outputs.logits  # (num_classes, H/?, W/?)
+    logits = outputs.logits 
+    logits = logits.view(len(images), len(class_labels), logits.shape[-2], logits.shape[-1])
     
-    # Upsample to original image size
-    orig_h, orig_w = image.size[1], image.size[0]
-    
-    if logits.dim() == 2:
-        # Single class case — shouldn't happen but handle
-        logits = logits.unsqueeze(0)
-    
-    # (num_classes, H, W) -> upsample
-    logits_up = torch.nn.functional.interpolate(
-        logits.unsqueeze(0) if logits.dim() == 3 else logits,
-        size=(orig_h, orig_w),
-        mode="bilinear",
-        align_corners=False
-    )
-    
-    # Squeeze batch dim if present
-    if logits_up.dim() == 4:
-        logits_up = logits_up.squeeze(0)  # (num_classes, H, W)
-    
-    # Argmax over classes
-    seg_map = logits_up.argmax(dim=0).cpu().numpy().astype(np.uint8)
-    
-    return seg_map
-
+    seg_maps = []
+    for i, image in enumerate(images):
+        orig_w, orig_h = image.size
+        img_logits = logits[i]
+        
+        if img_logits.dim() == 2:
+            img_logits = img_logits.unsqueeze(0)
+            
+        logits_up = torch.nn.functional.interpolate(
+            img_logits.unsqueeze(0),
+            size=(orig_h, orig_w),
+            mode="bilinear",
+            align_corners=False
+        ).squeeze(0)
+        
+        seg_map = logits_up.argmax(dim=0).cpu().numpy().astype(np.uint8)
+        seg_maps.append(seg_map)
+        
+    return seg_maps
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
-    # Load CLIPSeg
     model_name = "CIDAS/clipseg-rd64-refined"
     print(f"Loading model: {model_name}")
     
@@ -151,12 +143,6 @@ def main():
         print(f"Failed to load model: {e}")
         return
     
-    print(f"\nCustom classes ({NUM_CLASSES}):")
-    for i, cls in enumerate(CUSTOM_CLASSES):
-        r, g, b = CUSTOM_PALETTE[i]
-        print(f"  {i:2d}: {cls:20s}  RGB({r:3d},{g:3d},{b:3d})")
-    
-    # Process each camera
     for cam_name in CAMERAS:
         cam_in_dir = os.path.join(IMAGE_DIR, cam_name)
         cam_out_dir = os.path.join(OUTPUT_DIR, cam_name)
@@ -172,60 +158,58 @@ def main():
             glob.glob(os.path.join(cam_in_dir, "*.png"))
         )
         
-        if LIMIT:
-            img_paths = img_paths[:LIMIT]
-        
-        print(f"\nProcessing {cam_name}: {len(img_paths)} images...")
-        
-        for i, img_path in enumerate(img_paths):
-            basename = os.path.basename(img_path)
+        unprocessed_paths = []
+        for p in img_paths:
+            basename = os.path.basename(p)
             name_no_ext = os.path.splitext(basename)[0]
             save_path = os.path.join(cam_out_dir, f"{name_no_ext}.npy")
-            vis_path = os.path.join(cam_out_dir, f"{name_no_ext}_vis.png")
+            if not os.path.exists(save_path):
+                unprocessed_paths.append(p)
+        
+        if LIMIT:
+            unprocessed_paths = unprocessed_paths[:LIMIT]
             
-            if os.path.exists(save_path):
-                continue
+        if not unprocessed_paths:
+            print(f"\n{cam_name}: All {len(img_paths)} images already processed.")
+            continue
+        
+        print(f"\nProcessing {cam_name}: {len(unprocessed_paths)} images...")
+        
+        processed_count = 0
+        total = len(unprocessed_paths)
+        
+        for batch_start in range(0, total, BATCH_SIZE):
+            batch_paths = unprocessed_paths[batch_start:batch_start + BATCH_SIZE]
+            batch_images = [Image.open(p).convert("RGB") for p in batch_paths]
             
-            print(f"  [{i+1}/{len(img_paths)}] {cam_name}/{basename}", end="")
+            seg_maps = segment_image_batch(model, processor, batch_images, CLIP_PROMPTS, device)
             
-            try:
-                image = Image.open(img_path).convert("RGB")
+            for i, (path, image) in enumerate(zip(batch_paths, batch_images)):
+                basename = os.path.basename(path)
+                name_no_ext = os.path.splitext(basename)[0]
+                save_path = os.path.join(cam_out_dir, f"{name_no_ext}.npy")
+                vis_path = os.path.join(cam_out_dir, f"{name_no_ext}_vis.png")
                 
-                seg_map = segment_image(model, processor, image, CLIP_PROMPTS, device)
-                
-                # Save class map
+                seg_map = seg_maps[i]
                 np.save(save_path, seg_map)
                 
-                # Save visualization (overlay)
-                vis = CUSTOM_PALETTE[seg_map]  # (H, W, 3)
+                if not VISUALIZE_FIRST_ONLY or processed_count == 0:
+                    vis = CUSTOM_PALETTE[seg_map]
+                    orig_arr = np.array(image)
+                    if orig_arr.shape[:2] != vis.shape[:2]:
+                        image_resized = image.resize((vis.shape[1], vis.shape[0]))
+                        orig_arr = np.array(image_resized)
+                    
+                    blended = (0.4 * orig_arr + 0.6 * vis).astype(np.uint8)
+                    Image.fromarray(blended).save(vis_path)
                 
-                # Blend with original for better visualization
-                orig_arr = np.array(image)
-                if orig_arr.shape[:2] != vis.shape[:2]:
-                    image_resized = image.resize((vis.shape[1], vis.shape[0]))
-                    orig_arr = np.array(image_resized)
-                
-                blended = (0.4 * orig_arr + 0.6 * vis).astype(np.uint8)
-                Image.fromarray(blended).save(vis_path)
-                
-                # Print detected classes for first image per camera
-                if i == 0:
-                    unique, counts = np.unique(seg_map, return_counts=True)
-                    total = seg_map.size
-                    print()
-                    for cls_id, count in zip(unique, counts):
-                        pct = 100 * count / total
-                        if pct > 1.0:  # Only show classes > 1%
-                            print(f"      {CUSTOM_CLASSES[cls_id]:20s}: {pct:.1f}%")
-                else:
-                    print(" ✓")
-                
-            except Exception as e:
-                print(f" ERROR: {e}")
-    
+                processed_count += 1
+                if processed_count % min(10, BATCH_SIZE) == 0 or processed_count == total:
+                    print(f"\r  Progress: [{processed_count}/{total}]", end="")
+                    
+        print() # New line after progress
+        
     print("\nSemantic segmentation complete.")
-    print(f"Output: {OUTPUT_DIR}")
-
 
 if __name__ == "__main__":
     main()
