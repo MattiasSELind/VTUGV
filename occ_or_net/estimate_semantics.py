@@ -23,10 +23,10 @@ DATASET_DIR = os.path.join(HOME, "Downloads", "Data_Outdoors", "images")
 IMAGE_DIR = DATASET_DIR
 OUTPUT_DIR = os.path.join(HOME, "Downloads", "the_great_outdoors_data_semantics")
 
-CAMERAS = [ "front_right", "rear_center"]
+CAMERAS = ["front_left", "front_right", "rear_center"]
 
 # Limit for testing — set to None for full dataset
-LIMIT = 7252
+LIMIT = None
 
 # Optimization Configuration
 BATCH_SIZE = 8
