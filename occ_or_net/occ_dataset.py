@@ -63,7 +63,7 @@ def quat_to_mat(q, t):
 
 class OffRoadOccDataset(Dataset):
     def __init__(self, data_root, split="train", img_size=(256, 512), 
-                 cameras=["front_left", "front_right", "rear_center"],
+                 cameras=["front_left", "rear_center"],
                  max_time_diff_ns=50_000_000): # 50 milliseconds tolerance
         """
         Args:
@@ -82,7 +82,7 @@ class OffRoadOccDataset(Dataset):
         self.images_dir = os.path.join(data_root, "images")
         self.features_dir = os.path.join(data_root, "features")
         self.semantics_dir = os.path.join(data_root, "semantics")
-        self.odom_file = os.path.join(data_root, "odometry", "odometry_filtered_odom.csv")
+        self.odom_file = os.path.join(data_root, "poses.csv")
         
         # Load actual camera intrinsics
         self.K = self._load_intrinsics()
@@ -110,7 +110,6 @@ class OffRoadOccDataset(Dataset):
         intrinsics = {}
         mapping = {
             "front_left": "left_cam_intrinsic.txt",
-            "front_right": "right_cam_intrinsic.txt",
             "rear_center": "rear_cam_intrinsic.txt"
         }
         
@@ -148,7 +147,6 @@ class OffRoadOccDataset(Dataset):
         extrinsics = {}
         mapping = {
             "front_left": "transformslid2left_cam.yaml",
-            "front_right": "transformslid2right_cam.yaml",
             "rear_center": "transformslid2rear.yaml"
         }
         
@@ -181,12 +179,12 @@ class OffRoadOccDataset(Dataset):
     def _load_odometry(self):
         """Loads all poses from the odometry CSV."""
         df = pd.read_csv(self.odom_file)
-        times = (df['timestamp_sec'].values * 1e9 + df['timestamp_nsec'].values).astype(np.int64)
+        times = df['timestamp_ns'].values.astype(np.int64)
         
         poses = []
         for _, row in df.iterrows():
-            pos = [row['pos_x'], row['pos_y'], row['pos_z']]
-            quat = [row['orient_x'], row['orient_y'], row['orient_z'], row['orient_w']]
+            pos = [row['p_x'], row['p_y'], row['p_z']]
+            quat = [row['q_x'], row['q_y'], row['q_z'], row['q_w']]
             
             T = np.eye(4)
             T[:3, 3] = pos
@@ -229,48 +227,90 @@ class OffRoadOccDataset(Dataset):
         Builds a list of dictionaries containing available file paths and world poses
         for every valid synchronized timestep.
         """
+        import glob
         samples = []
+        
+        # We match frames across cameras by choosing a reference camera
+        # and finding the nearest timestamps in the others.
         ref_cam = self.cameras[0]
         
-        # Load the timestamps.csv for the reference camera
-        ref_ts_file = os.path.join(self.images_dir, ref_cam, "timestamps.csv")
-        if not os.path.exists(ref_ts_file):
-            print(f"Warning: Timestamps file not found for {ref_cam} at {ref_ts_file}")
-            return []
+        # 1. Collect all available feature timestamps per camera
+        cam_timestamps = {}
+        for cam in self.cameras:
+            feat_dir = os.path.join(self.features_dir, cam)
+            if not os.path.exists(feat_dir):
+                print(f"Features directory not found mapping to {cam}: {feat_dir}")
+                return []
             
-        df_ref = pd.read_csv(ref_ts_file)
+            # The basename of .npz is the bag timestamp (e.g. 1713882442722758732.npz)
+            feats = glob.glob(os.path.join(feat_dir, "*.npz"))
+            ts_list = []
+            for f in feats:
+                bn = os.path.splitext(os.path.basename(f))[0]
+                try:
+                    ts_list.append((int(bn), bn))
+                except ValueError:
+                    pass
+            
+            ts_list.sort(key=lambda x: x[0])
+            if not ts_list:
+                print(f"No valid timestamps extracted for camera {cam}")
+                return []
+                
+            times_arr = np.array([x[0] for x in ts_list], dtype=np.int64)
+            bns_arr = [x[1] for x in ts_list]
+            cam_timestamps[cam] = (times_arr, bns_arr)
+
+        ref_times, ref_bns = cam_timestamps[ref_cam]
         
-        # Optional: load timestamps for other cameras to find exact matches
-        # For simplicity in this example, we assume frames across cameras
-        # have exactly matching 'frame_XXXXXX.png' prefixes.
-        
-        for _, row in df_ref.iterrows():
-            ts = int(row['timestamp_sec'] * 1e9 + row['timestamp_nsec'])
-            filename = row['filename']
-            basename = os.path.splitext(filename)[0] # format: 'frame_XXXXXX'
+        for i in range(len(ref_times)):
+            t_ref = ref_times[i]
+            bn_ref = ref_bns[i]
             
-            # Find closest odometry pose
-            world_pose = self._get_nearest_pose(ts)
-            
-            # If no valid pose is found within the time threshold, skip this frame
+            world_pose = self._get_nearest_pose(t_ref)
             if world_pose is None:
                 continue
                 
             sample_data = {
-                "timestamp": ts,
+                "timestamp": t_ref,
                 "world_pose": world_pose,
-                "basename": basename,
+                "basename": bn_ref,
                 "cameras": {}
             }
             
-            # Check file existence across all cameras
             all_cams_valid = True
+            
             for cam in self.cameras:
-                img_path = os.path.join(self.images_dir, cam, f"{basename}.png")
-                feat_path = os.path.join(self.features_dir, cam, f"{basename}.npz")
-                sem_path = os.path.join(self.semantics_dir, cam, f"{basename}.npy")
+                if cam == ref_cam:
+                    closest_bn = bn_ref
+                else:
+                    times, bns = cam_timestamps[cam]
+                    idx = np.searchsorted(times, t_ref)
+                    
+                    best_idx = idx
+                    min_diff = float('inf')
+                    
+                    if idx < len(times):
+                        min_diff = abs(times[idx] - t_ref)
+                    if idx > 0 and abs(times[idx-1] - t_ref) < min_diff:
+                        best_idx = idx - 1
+                        min_diff = abs(times[idx-1] - t_ref)
+                    
+                    # 50 ms max synchronization error
+                    if min_diff > 50_000_000:
+                        all_cams_valid = False
+                        break
+                        
+                    closest_bn = bns[best_idx]
                 
-                # We require at minimum the image and features
+                # Check for either .jpg or .png
+                img_path_jpg = os.path.join(self.images_dir, cam, f"{closest_bn}.jpg")
+                img_path_png = os.path.join(self.images_dir, cam, f"{closest_bn}.png")
+                
+                img_path = img_path_jpg if os.path.exists(img_path_jpg) else img_path_png
+                feat_path = os.path.join(self.features_dir, cam, f"{closest_bn}.npz")
+                sem_path = os.path.join(self.semantics_dir, cam, f"{closest_bn}.npy")
+                
                 if not os.path.exists(img_path) or not os.path.exists(feat_path):
                     all_cams_valid = False
                     break
@@ -327,11 +367,10 @@ class OffRoadOccDataset(Dataset):
                 sem_tensor = torch.zeros(self.img_size, dtype=torch.long)
             sems.append(sem_tensor)
             
-            # 4. Global World Pose of the Camera
-            # T_world_cam = T_world_veh * T_veh_cam
+            # 4. Vehicle to Camera Extrinsics
+            # The network operates in the Vehicle frame, so we just need T_vehicle_to_camera
             T_veh_cam = self.T_veh_cam.get(cam, np.eye(4, dtype=np.float32))
-            T_world_cam = T_world_veh @ T_veh_cam
-            poses.append(torch.from_numpy(T_world_cam).float())
+            poses.append(torch.from_numpy(T_veh_cam).float())
             
             # 5. Intrinsics
             K_mat = self.K.get(cam, np.eye(4, dtype=np.float32))
@@ -342,9 +381,10 @@ class OffRoadOccDataset(Dataset):
             "images": torch.stack(imgs),       # [N, 3, H, W]
             "features": torch.stack(feats),    # [N, D, Hp, Wp]
             "semantics": torch.stack(sems),    # [N, H, W]
-            "poses": torch.stack(poses),       # [N, 4, 4] -> T_world_camera
+            "poses": torch.stack(poses),       # [N, 4, 4] -> T_veh_camera
             "intrinsics": torch.stack(intrinsics), # [N, 4, 4]
-            "basename": sample["basename"]
+            "basename": sample["basename"],
+            "world_pose": torch.from_numpy(T_world_veh).float() # Provide just in case
         }
 
 if __name__ == "__main__":

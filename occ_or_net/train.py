@@ -18,17 +18,17 @@ from off_road_occ_net import OffRoadOccNet
 from volume_renderer import VolumeRenderer
 
 # --- Configuration ---
-data_root = os.path.join(os.path.expanduser("~"), "Downloads", "VTUGV_pointclouds_outdoors")
+data_root = os.path.join(os.path.expanduser("~"), "Downloads", "Data_Outdoors")
 batch_size = 2
 learning_rate = 1e-4
-num_epochs = 50
+num_epochs = 30
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Model Params
-num_semantic_classes = 150
+num_semantic_classes = 14
 dinov2_feat_dim = 384
 embed_dim = 256
-cameras = ["front_left", "front_right", "rear_center"]
+cameras = ["front_left", "rear_center"]
 
 def feature_metric_loss(rendered_feats, ground_truth_feats):
     """
@@ -86,7 +86,7 @@ def train():
     
     renderer = VolumeRenderer(
         x_bounds=[-50, 50], y_bounds=[-50, 50], z_bounds=[-2, 6],
-        resolution=1.0, num_samples=64
+        resolution=0.25, num_samples=64
     ).to(device)
     
     optimizer = AdamW(occ_net.parameters(), lr=learning_rate, weight_decay=1e-4)

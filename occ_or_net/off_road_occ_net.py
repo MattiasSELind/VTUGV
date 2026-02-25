@@ -109,7 +109,7 @@ class VoxelGrid(nn.Module):
     """
     Generates the physical 3D coordinates for the query volume.
     """
-    def __init__(self, x_bounds=[-50, 50], y_bounds=[-50, 50], z_bounds=[-2, 6], resolution=1.0):
+    def __init__(self, x_bounds=[-50, 50], y_bounds=[-50, 50], z_bounds=[-2, 6], resolution=0.25):
         super().__init__()
         self.resolution = resolution
         # Number of voxels

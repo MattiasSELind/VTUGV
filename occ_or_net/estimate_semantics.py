@@ -19,14 +19,14 @@ from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
 
 # Configuration
 HOME = os.path.expanduser("~")
-DATASET_DIR = os.path.join(HOME, "Downloads", "Data_Outdoors", "images")
+DATASET_DIR = os.path.join(HOME, "Downloads", "Data_Outdoors")
 IMAGE_DIR = DATASET_DIR
-OUTPUT_DIR = os.path.join(HOME, "Downloads", "the_great_outdoors_data_semantics")
+OUTPUT_DIR = os.path.join(HOME, "Downloads","Data_Outdoors", "semantics")
 
-CAMERAS = ["front_left", "front_right", "rear_center"]
+CAMERAS = ["front_left", "rear_center"]
 
 # Limit for testing — set to None for full dataset
-LIMIT = None
+LIMIT = 1000
 
 # Optimization Configuration
 BATCH_SIZE = 8
