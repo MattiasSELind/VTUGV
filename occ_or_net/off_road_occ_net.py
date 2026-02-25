@@ -109,7 +109,7 @@ class VoxelGrid(nn.Module):
     """
     Generates the physical 3D coordinates for the query volume.
     """
-    def __init__(self, x_bounds=[-50, 50], y_bounds=[-50, 50], z_bounds=[-2, 6], resolution=0.25):
+    def __init__(self, x_bounds=[-50, 50], y_bounds=[-50, 50], z_bounds=[-2, 6], resolution=0.5):
         super().__init__()
         self.resolution = resolution
         # Number of voxels
@@ -166,13 +166,13 @@ class OffRoadOccNet(nn.Module):
     """
     Complete Off-Road QueryOcc Model.
     """
-    def __init__(self, num_semantic_classes=150, dinov2_feat_dim=384, embed_dim=256):
+    def __init__(self, num_semantic_classes=14, dinov2_feat_dim=384, embed_dim=256):
         super().__init__()
         
         self.backbone = ResNetBackbone(out_channels=embed_dim)
         
         # 100x100m grid, 8m tall, 1m resolution = 100 x 100 x 8 volume
-        self.voxel_grid = VoxelGrid(x_bounds=[-50, 50], y_bounds=[-50, 50], z_bounds=[-2, 6], resolution=1.0)
+        self.voxel_grid = VoxelGrid(x_bounds=[-50, 50], y_bounds=[-50, 50], z_bounds=[-2, 6], resolution=0.5)
         
         self.cross_attention = SpatialCrossAttention(embed_dim=embed_dim)
         
@@ -238,7 +238,7 @@ if __name__ == "__main__":
     # Mock Extrinsics (Vehicle -> Camera)
     T_v_c = torch.eye(4).unsqueeze(0).unsqueeze(0).repeat(B, num_cams, 1, 1)
     
-    model = OffRoadOccNet(num_semantic_classes=150, dinov2_feat_dim=384, embed_dim=256)
+    model = OffRoadOccNet(num_semantic_classes=14, dinov2_feat_dim=384, embed_dim=256)
     
     print("Testing OffRoadOccNet forward pass...")
     semantic_vol, feature_vol = model(images, K, T_v_c)

@@ -86,7 +86,7 @@ def train():
     
     renderer = VolumeRenderer(
         x_bounds=[-50, 50], y_bounds=[-50, 50], z_bounds=[-2, 6],
-        resolution=0.25, num_samples=64
+        resolution=0.5, num_samples=64
     ).to(device)
     
     optimizer = AdamW(occ_net.parameters(), lr=learning_rate, weight_decay=1e-4)
