@@ -46,14 +46,14 @@ def feature_metric_loss(rendered_feats, ground_truth_feats):
     loss = 1.0 - cos_sim.mean()
     return loss
 
-def semantic_loss(rendered_logits, ground_truth_labels):
+def semantic_loss(rendered_logits, ground_truth_labels, class_weights=None):
     """
     Cross Entropy Loss for semantic rendering.
     rendered_logits: [B, num_classes, H, W]
     ground_truth_labels: [B, H, W] (LongTensor of class indices)
     """
     # Cross entropy inherently applies log-softmax
-    loss = F.cross_entropy(rendered_logits, ground_truth_labels, ignore_index=0) # Assuming 0 is background/unknown
+    loss = F.cross_entropy(rendered_logits, ground_truth_labels, weight=class_weights, ignore_index=0) # Assuming 0 is background/unknown
     return loss
 
 def train():
@@ -90,6 +90,15 @@ def train():
     ).to(device)
     
     optimizer = AdamW(occ_net.parameters(), lr=learning_rate, weight_decay=1e-4)
+
+    # Load class weights if available
+    weights_path = os.path.join(data_root, "semantics", "class_weights.pt")
+    if os.path.exists(weights_path):
+        class_weights = torch.load(weights_path).to(device)
+        print(f"Loaded class weights from {weights_path}")
+    else:
+        print("Warning: class_weights.pt not found. Falling back to unweighted loss.")
+        class_weights = None
 
     # 3. Training Loop
     # In self-supervised volume rendering, we often train by:
@@ -160,7 +169,7 @@ def train():
                 
                 # Losses
                 f_loss = feature_metric_loss(rendered_feat, gt_feat)
-                s_loss = semantic_loss(rendered_sem, gt_sem_down)
+                s_loss = semantic_loss(rendered_sem, gt_sem_down, class_weights)
                 
                 batch_feat_loss += f_loss
                 batch_sem_loss += s_loss
