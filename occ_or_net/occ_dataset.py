@@ -82,6 +82,7 @@ class OffRoadOccDataset(Dataset):
         self.images_dir = os.path.join(data_root, "images")
         self.features_dir = os.path.join(data_root, "features")
         self.semantics_dir = os.path.join(data_root, "semantics")
+        self.depth_dir = os.path.join(data_root, "depth_front") # Added depth path
         self.odom_file = os.path.join(data_root, "poses.csv")
         
         # Load actual camera intrinsics
@@ -315,10 +316,14 @@ class OffRoadOccDataset(Dataset):
                     all_cams_valid = False
                     break
                     
+                # Check for depth map if this is the front camera
+                depth_path = os.path.join(self.depth_dir, f"{closest_bn}.npy") if cam == "front_left" else None
+                    
                 sample_data["cameras"][cam] = {
                     "image": img_path,
                     "features": feat_path,
-                    "semantics": sem_path if os.path.exists(sem_path) else None
+                    "semantics": sem_path if os.path.exists(sem_path) else None,
+                    "depth": depth_path if depth_path and os.path.exists(depth_path) else None
                 }
                 
             if all_cams_valid:
@@ -342,6 +347,10 @@ class OffRoadOccDataset(Dataset):
         
         # The base vehicle world pose at this exact time step
         T_world_veh = sample["world_pose"]
+        
+        # Prepare optional target BEV output
+        ground_truth_bev_sem = None
+        ground_truth_bev_valid = None
         
         for cam in self.cameras:
             cam_data = sample["cameras"][cam]
@@ -376,8 +385,65 @@ class OffRoadOccDataset(Dataset):
             K_mat = self.K.get(cam, np.eye(4, dtype=np.float32))
             intrinsics.append(torch.from_numpy(K_mat).float())
             
+            # 6. Build Target Pseudo-BEV Ground Truth (Front Camera Only)
+            if cam == "front_left" and cam_data["depth"] is not None:
+                depth_np = np.load(cam_data["depth"]) # Should be [H_orig, W_orig] depth map in meters
+                # Ensure it matches exactly what we scaled our semantics to
+                depth_im = Image.fromarray(depth_np).resize((self.img_size[1], self.img_size[0]), Image.NEAREST)
+                depth = torch.from_numpy(np.array(depth_im)).float()
+                
+                # Project pixels to 3D using intrinsics
+                H, W = self.img_size
+                y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+                
+                fx, fy = K_mat[0, 0], K_mat[1, 1]
+                cx, cy = K_mat[0, 2], K_mat[1, 2]
+                
+                # Camera Frame 3D Coordinates
+                Z_c = depth
+                X_c = (x.float() - cx) * Z_c / fx
+                Y_c = (y.float() - cy) * Z_c / fy
+                
+                # Flatten valid points
+                valid_depth = (Z_c > 0.5) & (Z_c < 50.0) # Filter out bad depth
+                pts_cam = torch.stack([X_c[valid_depth], Y_c[valid_depth], Z_c[valid_depth]], dim=1) # [N, 3]
+                sem_valid = sem_tensor[valid_depth] # [N]
+                
+                # Transform to Vehicle Frame
+                T_cam_veh = np.linalg.inv(T_veh_cam) # Because T_veh_cam goes from Veh -> Cam
+                R_cv = torch.from_numpy(T_cam_veh[:3, :3]).float()
+                t_cv = torch.from_numpy(T_cam_veh[:3, 3]).float()
+                
+                pts_veh = (R_cv @ pts_cam.T).T + t_cv # [N, 3]
+                
+                # Digitize into BEV Grid
+                # Matching Jetson Nano Prototype bounds [-25, 25] at 1m resolution (50x50)
+                # X points forward/back, Y points left/right in vehicle frame roughly
+                x_bounds = [-25, 25]
+                y_bounds = [-25, 25]
+                res = 1.0
+                
+                idx_x = torch.floor((pts_veh[:, 0] - x_bounds[0]) / res).long()
+                idx_y = torch.floor((pts_veh[:, 1] - y_bounds[0]) / res).long()
+                
+                # Filter points inside bounding box
+                in_bounds = (idx_x >= 0) & (idx_x < 50) & (idx_y >= 0) & (idx_y < 50)
+                
+                idx_x = idx_x[in_bounds]
+                idx_y = idx_y[in_bounds]
+                sem_valid = sem_valid[in_bounds]
+                
+                # Create the target grids
+                ground_truth_bev_sem = torch.zeros((50, 50), dtype=torch.long)
+                ground_truth_bev_valid = torch.zeros((50, 50), dtype=torch.bool)
+                
+                # Scatter the semantic ids into the grid. 
+                # (For simplicity, last written value wins if multiple points fall in voxel)
+                ground_truth_bev_sem[idx_y, idx_x] = sem_valid
+                ground_truth_bev_valid[idx_y, idx_x] = True
+            
         # Stack all lists to tensors
-        return {
+        output_batch = {
             "images": torch.stack(imgs),       # [N, 3, H, W]
             "features": torch.stack(feats),    # [N, D, Hp, Wp]
             "semantics": torch.stack(sems),    # [N, H, W]
@@ -386,6 +452,13 @@ class OffRoadOccDataset(Dataset):
             "basename": sample["basename"],
             "world_pose": torch.from_numpy(T_world_veh).float() # Provide just in case
         }
+        
+        # Add BEV targets if successfully created
+        if ground_truth_bev_sem is not None:
+            output_batch["gt_bev_semantic"] = ground_truth_bev_sem
+            output_batch["gt_bev_valid"] = ground_truth_bev_valid
+            
+        return output_batch
 
 if __name__ == "__main__":
     # Test the dataset instantiation
