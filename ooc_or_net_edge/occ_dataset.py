@@ -133,7 +133,7 @@ class OffRoadOccDataset(Dataset):
             "rear_center": "rear_cam_intrinsic.txt"
         }
         
-        path_base = os.path.join(self.data_root, "camera_intrinsics", "camera_intrinsics")
+        path_base = os.path.join(self.data_root, "camera_intrinsics") 
         
         for cam in self.cameras:
             filename = mapping.get(cam)
@@ -170,7 +170,7 @@ class OffRoadOccDataset(Dataset):
             "rear_center": "transformslid2rear.yaml"
         }
         
-        path_base = os.path.join(self.data_root, "camera2lidar", "camera2lidar")
+        path_base = os.path.join(self.data_root, "camera2lidar")
         
         for cam in self.cameras:
             filename = mapping.get(cam)
@@ -259,7 +259,7 @@ class OffRoadOccDataset(Dataset):
         for cam in self.cameras:
             feat_dir = os.path.join(self.features_dir, cam)
             if not os.path.exists(feat_dir):
-                print(f"Features directory not found mapping to {cam}: {feat_dir}")
+                print(f"DEBUG: Features directory not found mapping to {cam}: {feat_dir}")
                 return []
             
             # The basename of .npz is the bag timestamp (e.g. 1713882442722758732.npz)
@@ -289,6 +289,7 @@ class OffRoadOccDataset(Dataset):
             
             world_pose = self._get_nearest_pose(t_ref)
             if world_pose is None:
+                # print(f"DEBUG: Dropped {bn_ref} because no Odom pose within {self.max_time_diff}ns.")
                 continue
                 
             sample_data = {
@@ -315,9 +316,9 @@ class OffRoadOccDataset(Dataset):
                     if idx > 0 and abs(times[idx-1] - t_ref) < min_diff:
                         best_idx = idx - 1
                         min_diff = abs(times[idx-1] - t_ref)
-                    
                     # 50 ms max synchronization error
                     if min_diff > 50_000_000:
+                        print(f"DEBUG: Dropped {bn_ref} because cam {cam} sync diff is {min_diff} > 50ms.")
                         all_cams_valid = False
                         break
                         
@@ -332,6 +333,7 @@ class OffRoadOccDataset(Dataset):
                 sem_path = os.path.join(self.semantics_dir, cam, f"{closest_bn}.npy")
                 
                 if not os.path.exists(img_path) or not os.path.exists(feat_path):
+                    print(f"DEBUG: Dropped {bn_ref} because missing img or feat for {cam}.")
                     all_cams_valid = False
                     break
                     
@@ -382,8 +384,6 @@ class OffRoadOccDataset(Dataset):
         seq_imgs = []
         seq_feats = []
         seq_sems = []
-        seq_depths_2d = []
-        seq_depths_2d_valid = []
         seq_poses = []
         seq_intrinsics = []
         seq_basenames = []
@@ -404,8 +404,6 @@ class OffRoadOccDataset(Dataset):
             imgs = []
             feats = []
             sems = []
-            depths_2d = []
-            depths_2d_valid = []
             poses = []
             intrinsics = []
             
@@ -451,9 +449,9 @@ class OffRoadOccDataset(Dataset):
             K_mat = self.K.get(cam, np.eye(4, dtype=np.float32))
             intrinsics.append(torch.from_numpy(K_mat).float())
             
-            # 6. Build Target Pseudo-BEV Ground Truth & Raw 2D Depth (Front Camera Only)
-            depth_tensor = torch.zeros(self.img_size, dtype=torch.float32)
-            depth_valid = torch.zeros(self.img_size, dtype=torch.bool)
+            # 6. Build Target Pseudo-BEV Ground Truth (Front Camera Only)
+            # We still need depth here uniquely to generate the dense gt_bev pointcloud, 
+            # but we won't return the raw 2D depth back down to the training objective.
             
             if cam == "front_left" and cam_data["depth"] is not None:
                 depth_np = np.load(cam_data["depth"]) # Should be [H_orig, W_orig] depth map in meters
@@ -461,8 +459,7 @@ class OffRoadOccDataset(Dataset):
                 depth_im = Image.fromarray(depth_np).resize((self.img_size[1], self.img_size[0]), Image.NEAREST)
                 depth = torch.from_numpy(np.array(depth_im)).float()
                 
-                # Assign 2D depth for backbone supervision
-                depth_tensor = depth
+                # Assign 2D depth for pointcloud projection
                 depth_valid = (depth > 0.5) & (depth < 50.0)
                 
                 # Project pixels to 3D using intrinsics
@@ -540,14 +537,9 @@ class OffRoadOccDataset(Dataset):
                     for c_idx, c_cost in class_cost_mapping.items():
                         final_gt_bev_cost[final_gt_bev_sem == c_idx] = c_cost
                 
-            depths_2d.append(depth_tensor)
-            depths_2d_valid.append(depth_valid)
-            
             seq_imgs.append(torch.stack(imgs))
             seq_feats.append(torch.stack(feats))
             seq_sems.append(torch.stack(sems))
-            seq_depths_2d.append(torch.stack(depths_2d))
-            seq_depths_2d_valid.append(torch.stack(depths_2d_valid))
             seq_poses.append(torch.stack(poses))
             seq_intrinsics.append(torch.stack(intrinsics))
             
@@ -556,8 +548,6 @@ class OffRoadOccDataset(Dataset):
             "images": torch.stack(seq_imgs),                 # [S, N, 3, H, W]
             "features": torch.stack(seq_feats),              # [S, N, D, Hp, Wp]
             "semantics": torch.stack(seq_sems),              # [S, N, H, W]
-            "depths_2d": torch.stack(seq_depths_2d),         # [S, N, H, W]
-            "depths_2d_valid": torch.stack(seq_depths_2d_valid), # [S, N, H, W]
             "poses": torch.stack(seq_poses),                 # [S, N, 4, 4] -> T_veh_camera
             "intrinsics": torch.stack(seq_intrinsics),       # [S, N, 4, 4]
             "basename": seq_basenames,                       # List [S]
