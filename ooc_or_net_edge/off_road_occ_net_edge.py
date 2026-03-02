@@ -54,8 +54,8 @@ class DepthHead(nn.Module):
         )
         
     def forward(self, x):
-        # x: [B*num_cams, C, H_feat, W_feat]
-        # output: [B*num_cams, 1, H_feat, W_feat]
+        # x: [B, C, H_feat, W_feat]
+        # output: [B, 1, H_feat, W_feat]
         return torch.relu(self.conv(x)) # Depth must be positive
 
 
@@ -196,14 +196,14 @@ class LSSViewTransformer(nn.Module):
     def forward(self, features, depths, intrinsics, extrinsics):
         """
         Args:
-            features: [B, num_cams, C, fH, fW] 2D Backbone Embeddings
-            depths: [B, num_cams, 1, fH, fW] Absolute depth in meters
-            intrinsics: [B, num_cams, 4, 4] Intrinsics at the fH/fW scale
-            extrinsics: [B, num_cams, 4, 4] T_veh_camera
+            features: [B, C, fH, fW] 2D Backbone Embeddings
+            depths: [B, 1, fH, fW] Absolute depth in meters
+            intrinsics: [B, 4, 4] Intrinsics at the fH/fW scale
+            extrinsics: [B, 4, 4] T_veh_camera
         Returns:
             bev_volume: [B, C, Y, X] 
         """
-        B, num_cams, C, fH, fW = features.shape
+        B, C, fH, fW = features.shape
         device = features.device
         
         # 1. Create a flattened pixel grid [fH, fW] -> [fH*fW, 2]
@@ -214,63 +214,53 @@ class LSSViewTransformer(nn.Module):
         bev_volume = torch.zeros((B, C, self.Y, self.X), device=device)
         
         for b in range(B):
-            b_coords = []
-            b_feats = []
+            feat_c = features[b] # [C, fH, fW]
+            depth_c = depths[b]  # [1, fH, fW]
+            K_c = intrinsics[b]  # [4, 4]
+            T_vc = extrinsics[b] # [4, 4]
             
-            for cam in range(num_cams):
-                feat_c = features[b, cam] # [C, fH, fW]
-                depth_c = depths[b, cam]  # [1, fH, fW]
-                K_c = intrinsics[b, cam]  # [4, 4]
-                T_vc = extrinsics[b, cam] # [4, 4]
+            # --- LIFT (2D -> 3D Camera) ---
+            K_inv_3x3 = torch.inverse(K_c[:3, :3])
+            
+            # Multiply pixel rays by inverse intrisics and absolute depth
+            # P_cam = K^-1 * uv_homog * Z
+            rays = torch.matmul(K_inv_3x3, pix_coords) # [3, fH*fW]
+            depth_flat = depth_c.view(1, -1) # [1, fH*fW]
+            P_cam = rays * depth_flat # [3, fH*fW]
+            
+            # Filter valid depths
+            valid_depth = (depth_flat > 0.5) & (depth_flat < 50.0) # [1, N]
+            P_cam_valid = P_cam[:, valid_depth.squeeze(0)] # [3, N_valid]
+            feat_valid = feat_c.view(C, -1)[:, valid_depth.squeeze(0)] # [C, N_valid]
+            
+            if P_cam_valid.shape[1] == 0:
+                continue
                 
-                # --- LIFT (2D -> 3D Camera) ---
-                K_inv_3x3 = torch.inverse(K_c[:3, :3])
-                
-                # Multiply pixel rays by inverse intrisics and absolute depth
-                # P_cam = K^-1 * uv_homog * Z
-                rays = torch.matmul(K_inv_3x3, pix_coords) # [3, fH*fW]
-                depth_flat = depth_c.view(1, -1) # [1, fH*fW]
-                P_cam = rays * depth_flat # [3, fH*fW]
-                
-                # Filter valid depths
-                valid_depth = (depth_flat > 0.5) & (depth_flat < 50.0) # [1, N]
-                P_cam_valid = P_cam[:, valid_depth.squeeze(0)] # [3, N_valid]
-                feat_valid = feat_c.view(C, -1)[:, valid_depth.squeeze(0)] # [C, N_valid]
-                
-                if P_cam_valid.shape[1] == 0:
-                    continue
-                    
-                # Homogenize Camera Points
-                ones = torch.ones((1, P_cam_valid.shape[1]), device=device)
-                P_cam_homog = torch.cat([P_cam_valid, ones], dim=0) # [4, N_valid]
-                
-                # Transform to Vehicle Frame
-                P_veh = torch.matmul(T_vc, P_cam_homog) # [4, N_valid]
-                
-                # Filter points within the physical BEV grid bounds
-                x_v = P_veh[0, :]
-                y_v = P_veh[1, :]
-                z_v = P_veh[2, :]
-                
-                valid_bounds = (x_v >= self.x_bounds[0]) & (x_v < self.x_bounds[1]) & \
-                               (y_v >= self.y_bounds[0]) & (y_v < self.y_bounds[1]) & \
-                               (z_v >= self.z_bounds[0]) & (z_v < self.z_bounds[1])
-                               
-                P_veh_valid = P_veh[:3, valid_bounds] # [3, N_final]
-                feat_final = feat_valid[:, valid_bounds] # [C, N_final]
-                
-                if P_veh_valid.shape[1] == 0:
-                    continue
-                    
-                b_coords.append(P_veh_valid)
-                b_feats.append(feat_final)
-                
-            if len(b_coords) == 0:
+            # Homogenize Camera Points
+            ones = torch.ones((1, P_cam_valid.shape[1]), device=device)
+            P_cam_homog = torch.cat([P_cam_valid, ones], dim=0) # [4, N_valid]
+            
+            # Transform to Vehicle Frame
+            P_veh = torch.matmul(T_vc, P_cam_homog) # [4, N_valid]
+            
+            # Filter points within the physical BEV grid bounds
+            x_v = P_veh[0, :]
+            y_v = P_veh[1, :]
+            z_v = P_veh[2, :]
+            
+            valid_bounds = (x_v >= self.x_bounds[0]) & (x_v < self.x_bounds[1]) & \
+                           (y_v >= self.y_bounds[0]) & (y_v < self.y_bounds[1]) & \
+                           (z_v >= self.z_bounds[0]) & (z_v < self.z_bounds[1])
+                           
+            P_veh_valid = P_veh[:3, valid_bounds] # [3, N_final]
+            feat_final = feat_valid[:, valid_bounds] # [C, N_final]
+            
+            if P_veh_valid.shape[1] == 0:
                 continue
                 
             # Aggregate all valid frustum points for this batch element
-            all_coords = torch.cat(b_coords, dim=1) # [3, N_total]
-            all_feats = torch.cat(b_feats, dim=1) # [C, N_total]
+            all_coords = P_veh_valid # [3, N_total]
+            all_feats = feat_final # [C, N_total]
             
             # --- SPLAT (3D -> 2D Grid Accumulation) ---
             # Digitize to grid indices
@@ -378,9 +368,9 @@ class OffRoadOccNetEdge(nn.Module):
     def forward(self, images, intrinsics, extrinsics, prev_bev=None, prev_pose=None, curr_pose=None):
         """
         Args:
-            images: [B, num_cams, 3, H, W]
-            intrinsics: [B, num_cams, 4, 4]
-            extrinsics: [B, num_cams, 4, 4]
+            images: [B, 3, H, W]
+            intrinsics: [B, 4, 4]
+            extrinsics: [B, 4, 4]
             prev_bev: [B, C, Y, X] Hidden state from previous timestamp
             prev_pose: [B, 4, 4] World pose at t-1
             curr_pose: [B, 4, 4] World pose at t
@@ -389,27 +379,24 @@ class OffRoadOccNetEdge(nn.Module):
             semantic_bev: [B, num_classes, Y, X] BEV Map
             feature_bev: [B, dinov2_dim, Y, X] BEV Map
             cost_map: [B, 1, Y, X] Traversability Cost Map [0, 1]
-            depths_2d: [B, num_cams, 1, fH, fW] Auxiliary Depth Features
+            depths_2d: [B, 1, fH, fW] Auxiliary Depth Features
             curr_bev_state: [B, C, Y, X] Raw BEV feature map representing recurrent state t
         """
-        B, num_cams, C, H, W = images.shape
+        B, C, H, W = images.shape
         
         # 1. Image Backbone
-        images_flat = images.view(B * num_cams, C, H, W)
-        features_flat = self.backbone(images_flat) 
+        features = self.backbone(images) 
         
         # Auxiliary Depth Head Prediction
-        depths_flat = self.depth_head(features_flat)
-        
-        _, embed_dim, fH, fW = features_flat.shape
-        features = features_flat.view(B, num_cams, embed_dim, fH, fW)
-        depths_2d = depths_flat.view(B, num_cams, 1, fH, fW)
+        depths_2d = self.depth_head(features)
         
         # 2. Lift-Splat Forward Projection
         scale_factor = 1.0 / 16.0
         scaled_intrinsics = intrinsics.clone()
-        scaled_intrinsics[:, :, 0, :] *= scale_factor # fx, cx
-        scaled_intrinsics[:, :, 1, :] *= scale_factor # fy, cy
+        scaled_intrinsics[:, 0, :] *= scale_factor # fx, cx
+        scaled_intrinsics[:, 1, :] *= scale_factor # fy, cy
+        
+        bev_volume = self.lss(features, depths_2d, scaled_intrinsics, extrinsics)
         
         # 3. Temporal Alignment and Fusion
         aligned_prev_bev = None
@@ -436,18 +423,18 @@ if __name__ == "__main__":
     print(f"Total Model Parameters: {total_params / 1e6:.2f} M")
     
     # Quick shape sanity check mapping reality
-    B, num_cams = 1, 2  # Jetson Nano typically processes 1 batch and maybe 2 cameras
+    B = 1  # Jetson Nano typically processes 1 batch
     H, W = 256, 512
     
-    images = torch.randn(B, num_cams, 3, H, W)
+    images = torch.randn(B, 3, H, W)
     
-    K = torch.eye(4).unsqueeze(0).unsqueeze(0).repeat(B, num_cams, 1, 1)
-    K[:, :, 0, 0] = 477.0 # fx
-    K[:, :, 1, 1] = 477.0 # fy
-    K[:, :, 0, 2] = 256.0 # cx
-    K[:, :, 1, 2] = 128.0 # cy
+    K = torch.eye(4).unsqueeze(0).repeat(B, 1, 1)
+    K[:, 0, 0] = 477.0 # fx
+    K[:, 1, 1] = 477.0 # fy
+    K[:, 0, 2] = 256.0 # cx
+    K[:, 1, 2] = 128.0 # cy
     
-    T_v_c = torch.eye(4).unsqueeze(0).unsqueeze(0).repeat(B, num_cams, 1, 1)
+    T_v_c = torch.eye(4).unsqueeze(0).repeat(B, 1, 1)
     
     # Dummy world poses for temporal processing
     T_w_prev = torch.eye(4).unsqueeze(0).repeat(B, 1, 1)
@@ -468,6 +455,6 @@ if __name__ == "__main__":
     print(f"Semantic BEV Output Shape: {sem_t1.shape} (Expected: [1, 14, 50, 50])")
     print(f"Feature BEV Output Shape: {feat_t1.shape} (Expected: [1, 384, 50, 50])")
     print(f"Cost Map Output Shape: {cost_t1.shape} (Expected: [1, 1, 50, 50])")
-    print(f"Depth 2D Output Shape: {d_t1.shape} (Expected: [1, 2, 1, 16, 32])")
+    print(f"Depth 2D Output Shape: {d_t1.shape} (Expected: [1, 1, 16, 32])")
     print(f"Temporal Internal State Output: {state_t1.shape}")
     print("Test passed successfully!")

@@ -25,10 +25,10 @@ num_epochs = 30
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Model Params
-num_semantic_classes = 14
+num_semantic_classes = 13
 dinov2_feat_dim = 384
 embed_dim = 128
-cameras = ["front_left", "rear_center"]
+cameras = ["front_left"]
 
 def masked_semantic_loss(pred_logits, target_labels, valid_mask, class_weights=None):
     """
@@ -90,6 +90,23 @@ def masked_cost_loss(pred_cost, target_cost, mask):
     loss = F.smooth_l1_loss(pred_cost.squeeze(1), target_cost, reduction='none')
     return (loss * mask).sum() / (mask.sum() + 1e-6)
 
+def masked_depth_loss(pred_depths_2d, gt_lidar_depths, valid_mask):
+    """
+    Smooth L1 (Huber) Loss for explicit continuous depth regression.
+    pred_depths_2d: [B, 1, fH, fW] Predicted Depth
+    gt_lidar_depths: [B, 1, fH, fW] Lidar depth projected to feature scale
+    valid_mask: [B, 1, fH, fW] Mask denoting where lidar hits exist
+    """
+    loss = F.smooth_l1_loss(pred_depths_2d, gt_lidar_depths, reduction='none')
+    # Apply mask
+    masked_loss = loss * valid_mask.float()
+    
+    num_valid = valid_mask.sum()
+    if num_valid > 0:
+        return masked_loss.sum() / num_valid
+    else:
+        return torch.tensor(0.0, device=pred_depths_2d.device, requires_grad=True)
+
 def visualize_bev(pred_sem, gt_sem, pred_occ, gt_occ, pred_cost, gt_cost, epoch, batch_idx, save_dir="bev_visualizations"):
     """
     Saves a visualization comparing the predicted multi-task BEV outputs to Ground Truth.
@@ -118,11 +135,11 @@ def visualize_bev(pred_sem, gt_sem, pred_occ, gt_occ, pred_cost, gt_cost, epoch,
     axes[0, 1].axis('off')
     
     # Row 1: Semantics
-    axes[1, 0].imshow(gt_sem_classes, cmap='tab20', vmin=0, vmax=14)
+    axes[1, 0].imshow(gt_sem_classes, cmap='tab20', vmin=0, vmax=13)
     axes[1, 0].set_title("GT Semantics")
     axes[1, 0].axis('off')
     
-    axes[1, 1].imshow(pred_sem_classes, cmap='tab20', vmin=0, vmax=14)
+    axes[1, 1].imshow(pred_sem_classes, cmap='tab20', vmin=0, vmax=13)
     axes[1, 1].set_title("Predicted Semantics")
     axes[1, 1].axis('off')
     
@@ -168,20 +185,19 @@ def train():
     
     # Inverted frequency weights clamped to max 50.0
     actual_weights = [
-        0.2818,   # Class 0
-        0.0890,   # Class 1
-        0.0513,   # Class 2
-        1.0000,   # Class 3
-        50.0000,  # Class 4
-        4.1579,   # Class 5
-        21.3335,  # Class 6
-        0.2785,   # Class 7
-        50.0000,  # Class 8
-        19.0855,  # Class 9
-        19.7631,  # Class 10
-        0.5326,   # Class 11
-        0.2916,   # Class 12
-        1.0       # Class 13 (Padding just in case the dataset features a 14th class)
+        0.2818,   # Class 0 dirt road  -> 🟤 brown
+        0.0890,   # Class 1 grass      -> 🟢 lawn green
+        0.0513,   # Class 2 tree       -> 🌲 forest green
+        1.0000,   # Class 3 bush       -> 🟢 green
+        50.0000,  # Class 4 rock       -> ⬜ gray
+        4.1579,   # Class 5 mud        -> 🟤 dark brown
+        21.3335,  # Class 6 water      -> 🔵 blue
+        0.2785,   # Class 7 sky        -> 🔵 light blue
+        50.0000,  # Class 8 vehicle    -> 🔵 dark blue
+        19.0855,  # Class 9 person     -> 🔴 red
+        19.7631,  # Class 10 building   -> ⬛ dark gray
+        0.5326,   # Class 11 fence      -> ⬜ blush
+        0.2916,   # Class 12 terrain    -> 🟡 tan
     ]
     
     class_weights = torch.tensor(actual_weights, dtype=torch.float32, device=device)
@@ -206,9 +222,9 @@ def train():
             optimizer.zero_grad()
             
             # Extract sequence properties
-            images_seq = batch["images"].to(device)           # [S, B, num_cams, 3, H, W]
-            poses_seq = batch["poses"].to(device)             # [S, B, num_cams, 4, 4] T_veh_camera
-            intrinsics_seq = batch["intrinsics"].to(device)   # [S, B, num_cams, 4, 4]
+            images_seq = batch["images"].to(device)           # [S, B, 3, H, W]
+            poses_seq = batch["poses"].to(device)             # [S, B, 4, 4] T_veh_camera
+            intrinsics_seq = batch["intrinsics"].to(device)   # [S, B, 4, 4]
             world_poses_seq = batch["world_pose"].to(device)  # [S, B, 4, 4] T_world_veh
             
             # Ground truth targets are only evaluated at the FINAL step S-1
@@ -217,6 +233,10 @@ def train():
             gt_bev_feat = batch["gt_bev_feat"].to(device)    # [B, 384, 50, 50]
             gt_bev_occ = batch["gt_bev_occ"].to(device)      # [B, 50, 50]
             gt_bev_cost = batch["gt_bev_cost"].to(device)    # [B, 50, 50]
+            
+            # 2D Depth targets from LiDAR (only needed for the final frame S-1 during distillation)
+            gt_lidar_depths = batch["gt_lidar_depth_2d"].to(device) # [B, 1, fH, fW]
+            gt_lidar_valid = batch["gt_lidar_valid"].to(device)     # [B, 1, fH, fW]
             
             S = images_seq.shape[0]
             prev_state = None
@@ -255,15 +275,16 @@ def train():
             # Traversability Cost loss
             c_loss = masked_cost_loss(pred_cost_map, gt_bev_cost, gt_bev_valid)
             
-            # Replaced explicit `d_loss` (Stereo Depth)
-            # The network determines depth implicitly using backward gradients from Occ, Sem, Cost 
-            # traversing back into the View Transformer!
+            # Explicit Depth Loss from LiDAR projected into the 2D feature grid
+            # pred_depths_2d is [B, 1, fH, fW] output by the Auxiliary Depth Head
+            d_loss = masked_depth_loss(pred_depths_2d, gt_lidar_depths, gt_lidar_valid)
             
             alpha_distill = 10.0 # DINOv2 cosine distillation usually needs a higher weight to balance CE
             alpha_occ = 5.0      # Balance BCE scale
             alpha_cost = 5.0     # Balance Cost scale
+            alpha_depth = 3.0    # LiDAR Explicit Depth Regression
             
-            total_loss = s_loss + (alpha_distill * f_loss) + (alpha_occ * o_loss) + (alpha_cost * c_loss)
+            total_loss = s_loss + (alpha_distill * f_loss) + (alpha_occ * o_loss) + (alpha_cost * c_loss) + (alpha_depth * d_loss)
             
             # --- 3. Backpropagate ---
             if total_loss.requires_grad:
@@ -277,7 +298,13 @@ def train():
             total_occ_loss += o_loss.item()
             total_cost_loss += c_loss.item()
             
-            pbar.set_postfix({'Occ': f"{o_loss.item():.3f}", 'Sem': f"{s_loss.item():.3f}", 'Feat': f"{f_loss.item():.3f}", 'Cost': f"{c_loss.item():.3f}"})
+            pbar.set_postfix({
+                'Occ': f"{o_loss.item():.3f}", 
+                'Sem': f"{s_loss.item():.3f}", 
+                'Feat': f"{f_loss.item():.3f}", 
+                'Cost': f"{c_loss.item():.3f}",
+                'Depth': f"{d_loss.item():.3f}"
+            })
             
             # Save a visualization every 50 batches
             if batch_idx % 50 == 0:
