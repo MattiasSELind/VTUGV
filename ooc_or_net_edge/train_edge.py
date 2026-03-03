@@ -18,17 +18,17 @@ from off_road_occ_net_edge import OffRoadOccNetEdge
 from occ_dataset import OffRoadOccDataset
 
 # --- Configuration ---
-data_root = os.path.join(os.path.expanduser("~"), "Downloads", "Data_Outdoors")
+data_root = os.path.join(os.path.expanduser("~"), "Downloads", "Sample Dataset With Semantic Annotations")
 batch_size = 16 # Increased batch size for better gradient stability and batch norm performance
 learning_rate = 1e-4
-num_epochs = 30
+num_epochs = 15
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Model Params
 num_semantic_classes = 13
 dinov2_feat_dim = 384
 embed_dim = 128
-cameras = ["front_left"]
+cameras = ["0000"]
 
 def masked_semantic_loss(pred_logits, target_labels, valid_mask, class_weights=None):
     """

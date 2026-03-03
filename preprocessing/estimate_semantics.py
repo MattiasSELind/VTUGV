@@ -19,14 +19,14 @@ from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
 
 # Configuration
 HOME = os.path.expanduser("~")
-DATASET_DIR = os.path.join(HOME, "Downloads", "Data_Outdoors")
+DATASET_DIR = os.path.join(HOME, "Downloads", "Sample Dataset With Semantic Annotations", "pylon_camera_node")
 IMAGE_DIR = DATASET_DIR
-OUTPUT_DIR = os.path.join(HOME, "Downloads","Data_Outdoors", "semantics")
+OUTPUT_DIR = os.path.join(HOME, "Downloads","Sample Dataset With Semantic Annotations", "pylon_camera_node", "semantics")
 
-CAMERAS = ["front_left", "rear_center"]
+CAMERAS = ["0000"]
 
 # Limit for testing — set to None for full dataset
-LIMIT = 1000
+LIMIT = None
 
 # Optimization Configuration
 BATCH_SIZE = 8
