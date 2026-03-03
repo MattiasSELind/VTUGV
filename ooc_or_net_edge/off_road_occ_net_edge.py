@@ -424,7 +424,7 @@ if __name__ == "__main__":
     
     # Quick shape sanity check mapping reality
     B = 1  # Jetson Nano typically processes 1 batch
-    H, W = 256, 512
+    H, W = 308, 504
     
     images = torch.randn(B, 3, H, W)
     
@@ -455,6 +455,6 @@ if __name__ == "__main__":
     print(f"Semantic BEV Output Shape: {sem_t1.shape} (Expected: [1, 14, 50, 50])")
     print(f"Feature BEV Output Shape: {feat_t1.shape} (Expected: [1, 384, 50, 50])")
     print(f"Cost Map Output Shape: {cost_t1.shape} (Expected: [1, 1, 50, 50])")
-    print(f"Depth 2D Output Shape: {d_t1.shape} (Expected: [1, 1, 16, 32])")
+    print(f"Depth 2D Output Shape: {d_t1.shape} (Expected: [1, 1, 22, 36])")
     print(f"Temporal Internal State Output: {state_t1.shape}")
     print("Test passed successfully!")

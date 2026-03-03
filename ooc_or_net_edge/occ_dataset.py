@@ -9,7 +9,7 @@ import glob
 
 
 class OffRoadOccDataset(Dataset):
-    def __init__(self, data_root, split="train", img_size=(256, 512), 
+    def __init__(self, data_root, split="train", img_size=(308, 504), 
                  max_time_diff_ns=50_000_000, # 50 milliseconds tolerance
                  seq_len=2): # Number of continuous frames per sample
         """
@@ -57,12 +57,24 @@ class OffRoadOccDataset(Dataset):
         print(f"Dataset [{split}] initialized with {len(self.valid_indices)} synchronized sequences of length {self.seq_len}.")
 
     def _load_intrinsics(self):
-        """Hardcoded front_left camera intrinsics."""
+        """
+        Hardcoded front_left camera intrinsics, scaled down to match the network's processing resolution.
+        The original calibration was for 1920x1200 images.
+        We scale FX, FY, CX, CY by the exact ratio we shrink the image.
+        """
+        orig_w = 1200.0
+        orig_h = 1920.0
+        
+        target_h, target_w = self.img_size # (308, 504)
+        
+        scale_x = target_w / orig_w
+        scale_y = target_h / orig_h
+        
         K_mat = np.eye(4, dtype=np.float32)
-        K_mat[0, 0] = 1037.350 # FX
-        K_mat[1, 1] = 1124.614 # FY
-        K_mat[0, 2] = 708.762  # CX
-        K_mat[1, 2] = 549.905  # CY
+        K_mat[0, 0] = 1037.350 * scale_x # FX
+        K_mat[1, 1] = 1124.614 * scale_y # FY
+        K_mat[0, 2] = 708.762  * scale_x # CX
+        K_mat[1, 2] = 549.905  * scale_y # CY
                 
         return K_mat
 

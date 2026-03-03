@@ -41,13 +41,17 @@ VISUALIZE_FIRST_ONLY = True
 MODEL_SIZE = "small"
 
 # Input resolution for DINOv2 (must be multiple of 14 for ViT patch size)
-INPUT_SIZE = 518
+# Original images are large (1920x1200). 
+# We downscale to save training VRAM while keeping the aspect ratio roughly 1.6:1
+# 504 / 14 = 36 width patches. 308 / 14 = 22 height patches.
+INPUT_WIDTH = 504
+INPUT_HEIGHT = 308
 
 class ImageDataset(Dataset):
-    def __init__(self, img_paths, input_size):
+    def __init__(self, img_paths, target_height, target_width):
         self.img_paths = img_paths
         self.transform = T.Compose([
-            T.Resize((input_size, input_size), interpolation=T.InterpolationMode.BILINEAR),
+            T.Resize((target_height, target_width), interpolation=T.InterpolationMode.BILINEAR),
             T.ToTensor(),
             T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ])
@@ -110,7 +114,10 @@ def main():
     print(f"Using device: {device}")
     
     model, feat_dim = load_dinov2(MODEL_SIZE, device)
-    num_patches = INPUT_SIZE // 14
+    
+    # Feature map dimensions (patches)
+    patch_h = INPUT_HEIGHT // 14
+    patch_w = INPUT_WIDTH // 14
     
     for cam_name in CAMERAS:
         cam_in_dir = os.path.join(IMAGE_DIR, cam_name)
@@ -143,9 +150,9 @@ def main():
             print(f"\n{cam_name}: All {len(img_paths)} images already processed.")
             continue
             
-        print(f"\nProcessing {cam_name}: {len(unprocessed_paths)} images...")
+        print(f"\nProcessing {cam_name}: {len(unprocessed_paths)} images at {INPUT_WIDTH}x{INPUT_HEIGHT}...")
         
-        dataset = ImageDataset(unprocessed_paths, INPUT_SIZE)
+        dataset = ImageDataset(unprocessed_paths, INPUT_HEIGHT, INPUT_WIDTH)
         dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
         
         processed_count = 0
@@ -159,7 +166,7 @@ def main():
                 patch_tokens = features_dict["x_norm_patchtokens"]
             
             features_batch = patch_tokens.cpu().numpy()
-            features_batch = features_batch.reshape(-1, num_patches, num_patches, feat_dim)
+            features_batch = features_batch.reshape(-1, patch_h, patch_w, feat_dim)
             
             for i, path in enumerate(batch_paths):
                 basename = os.path.basename(path)
@@ -175,7 +182,7 @@ def main():
                     features=features.astype(np.float16),
                     orig_size=np.array([orig_h, orig_w]),
                     patch_size=np.array([14]),
-                    input_size=np.array([INPUT_SIZE]),
+                    input_size=np.array([INPUT_HEIGHT, INPUT_WIDTH]),
                 )
                 
                 if not VISUALIZE_FIRST_ONLY or processed_count == 0:

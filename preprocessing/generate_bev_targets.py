@@ -156,9 +156,11 @@ def generate_bev_for_frame():
         lidar_valid_mask[v_valid, u_valid] = True
         
         # Resize to feature map size if you are doing depth distillation at feature scale
-        # For our TrainEdge pipeline with DINOv2 small (patch size 14), feature h/w are H/14, W/14
+        # For our TrainEdge pipeline with DINOv2 small (patch size 14), our target downscaled dimensions are 308x504 (H, W).
+        # Feature h/w are H/14, W/14
         import cv2
-        fH, fW = IMG_HEIGHT // 14, IMG_WIDTH // 14
+        INPUT_WIDTH, INPUT_HEIGHT = 504, 308
+        fH, fW = INPUT_HEIGHT // 14, INPUT_WIDTH // 14
         
         # Using nearest neighbor to avoid interpolating empty space with valid depth
         depth_2d_feat = cv2.resize(lidar_depth_img, (fW, fH), interpolation=cv2.INTER_NEAREST)
@@ -169,7 +171,7 @@ def generate_bev_for_frame():
         out_path = os.path.join(OUTPUT_DIR, f"{name_no_ext}.npz")
         np.savez_compressed(
             out_path, 
-            depth_map_full=lidar_depth_img,   # [256, 512] full res depth map
+            depth_map_full=lidar_depth_img,   # [1920, 1200] full res depth map
             gt_lidar_depth_2d=depth_2d_feat,  # [fH, fW] float32 depth in meters
             gt_lidar_valid=valid_2d_feat      # [fH, fW] boolean mask
         )
