@@ -52,15 +52,20 @@ CX  = 708.762  - _CROP_X       # 628.762
 CY  = 549.905  * _SY           # 366.603
 IMG_H, IMG_W = 720, 1280
 
-# LiDAR → Camera extrinsic
+# LiDAR → Camera extrinsic (derived from transformslid2left_cam.yaml)
+# Quaternion (w,x,y,z)=(0.5,-0.5,0.5,-0.5) gives cam→lidar rotation;
+# inverted here for lidar→cam.  Translation signs from -R^T @ t_cam_lidar.
 T_VELO_CAM = np.array([
-    [ 0.0, -1.0,  0.0,  0.2   ],
-    [ 0.0,  0.0, -1.0,  0.275 ],
+    [ 0.0, -1.0,  0.0, -0.2   ],
+    [ 0.0,  0.0, -1.0, -0.275 ],
     [ 1.0,  0.0,  0.0, -0.355 ],
     [ 0.0,  0.0,  0.0,  1.0   ]
 ], dtype=np.float32)
 
-INFILL_RADIUS = BEV_RES  # fill ALL FOV cells with nearest observed value
+INFILL_RADIUS = 5  # ~1.25 m neighbourhood only
+
+# Semantic classes whose points should NOT contribute to ground height
+NON_GROUND_CLASSES = {2, 3, 7, 8}  # tree, bush, sky, vehicle
 
 
 # ── Pre-compute camera FOV mask on the BEV grid ─────────────────────
@@ -198,26 +203,31 @@ def generate_bev_targets():
         # Init grids
         bev_sem   = np.full((BEV_RES, BEV_RES), UNOBSERVED, dtype=np.uint8)
         bev_valid = np.zeros((BEV_RES, BEV_RES), dtype=bool)
-        h_sum     = np.zeros((BEV_RES, BEV_RES), dtype=np.float64)
-        h_cnt     = np.zeros((BEV_RES, BEV_RES), dtype=np.int32)
+        bev_height = np.zeros((BEV_RES, BEV_RES), dtype=np.float32)
 
         cell_id = row * BEV_RES + col
-        np.add.at(h_sum.ravel(), cell_id, Y_c.astype(np.float64))
-        np.add.at(h_cnt.ravel(), cell_id, 1)
 
-        # Majority vote for semantics
+        # Per-cell: majority-vote semantics + ground-height via percentile
         for cid in np.unique(cell_id):
             pts = cell_id == cid
             r_, c_ = divmod(int(cid), BEV_RES)
+
+            # Semantics – majority vote (unchanged)
             labels = sem_labels[pts]
             counts = np.bincount(labels, minlength=NUM_CLASSES)
             bev_sem[r_, c_]   = counts.argmax()
             bev_valid[r_, c_] = True
 
-        # Height
-        bev_height = np.zeros((BEV_RES, BEV_RES), dtype=np.float32)
-        has_h = h_cnt > 0
-        bev_height[has_h] = (h_sum[has_h] / h_cnt[has_h]).astype(np.float32)
+            # Height – 90th percentile of Y_c, excluding non-ground classes
+            # In camera frame positive Y = downward ≈ ground level
+            heights = Y_c[pts]
+            ground_mask = ~np.isin(labels, list(NON_GROUND_CLASSES))
+            if ground_mask.any():
+                heights = heights[ground_mask]
+            if len(heights) >= 3:
+                bev_height[r_, c_] = np.percentile(heights, 90)
+            else:
+                bev_height[r_, c_] = np.median(heights)
 
         # Apply FOV mask – zero out anything outside camera FOV
         bev_sem[~FOV_MASK]    = UNOBSERVED

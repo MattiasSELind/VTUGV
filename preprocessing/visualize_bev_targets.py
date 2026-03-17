@@ -39,8 +39,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--dir", default=os.path.join(
     os.path.expanduser("~"), "Downloads",
     "Sample Dataset With Semantic Annotations", "bev_targets", "0000"))
-parser.add_argument("--n", type=int, default=4)
-parser.add_argument("--start", type=int, default=0)
+parser.add_argument("--n", type=int, default=3)
+parser.add_argument("--start", type=int, default=30)
 parser.add_argument("--save", default=None)
 args = parser.parse_args()
 
