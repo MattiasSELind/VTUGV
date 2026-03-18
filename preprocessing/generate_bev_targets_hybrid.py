@@ -217,6 +217,38 @@ def load_depth_points(depth_path):
     return pts_ego[pts_ego[:, 0] >= MIN_FORWARD_DEPTH]
 
 
+# Semantic class names and colours (RGB 0-1) matching occ_dataset class_cost_mapping
+SEM_CLASSES = [
+    "dirt road", "grass", "tree", "bush", "rock",
+    "mud", "water", "sky", "vehicle", "person",
+    "building", "fence", "terrain",
+]
+SEM_COLORS = np.array([
+    [0.55, 0.40, 0.20],  # 0  dirt road  — brown
+    [0.40, 0.75, 0.30],  # 1  grass      — green
+    [0.13, 0.45, 0.13],  # 2  tree       — dark green
+    [0.20, 0.60, 0.20],  # 3  bush       — mid green
+    [0.65, 0.60, 0.55],  # 4  rock       — grey
+    [0.50, 0.35, 0.15],  # 5  mud        — dark brown
+    [0.20, 0.50, 0.90],  # 6  water      — blue
+    [0.55, 0.75, 0.95],  # 7  sky        — light blue
+    [0.95, 0.20, 0.20],  # 8  vehicle    — red
+    [0.95, 0.55, 0.10],  # 9  person     — orange
+    [0.70, 0.70, 0.70],  # 10 building   — light grey
+    [0.85, 0.85, 0.20],  # 11 fence      — yellow
+    [0.75, 0.65, 0.45],  # 12 terrain    — tan
+], dtype=np.float32)
+
+
+def _sem_to_rgb(sem, valid):
+    """Convert (BEV_RES, BEV_RES) int32 semantic map to (BEV_RES, BEV_RES, 3) RGB."""
+    rgb = np.ones((BEV_RES, BEV_RES, 3), dtype=np.float32) * 0.15  # dark background
+    for cls_id, colour in enumerate(SEM_COLORS):
+        mask = valid & (sem == cls_id)
+        rgb[mask] = colour
+    return rgb
+
+
 # -- BEV helpers --------------------------------------------------------------
 def _project_to_camera(pts_ego):
     """Project ego-frame points into the reference camera. Returns (u, v, valid_mask)."""
@@ -236,6 +268,17 @@ def _project_to_camera(pts_ego):
         v[idx] = vc[in_img]
         valid[idx] = True
     return u, v, valid
+
+
+def infill_nearest(grid, valid, radius):
+    """Nearest-neighbour infill for categorical grids (e.g. semantic labels)."""
+    if valid.all() or not valid.any():
+        return grid.copy()
+    dist, idx = ndimage.distance_transform_edt(~valid, return_indices=True)
+    fill = (~valid) & (dist <= radius)
+    out  = grid.copy()
+    out[fill] = grid[idx[0][fill], idx[1][fill]]
+    return out
 
 
 def infill_idw(grid, valid, radius, power=IDW_POWER):
@@ -477,13 +520,22 @@ def points_to_bev(pts_ego, source=None, sem_img=None, feat_map=None):
     bev_above_ground_f[~valid_f] = 0.0
     bev_slope_f[~valid_f]        = 0.0
 
-    # -- 8. FOV mask ----------------------------------------------------------
+    # -- 8. Semantic nearest-neighbour infill (categorical — no averaging) ----
+    sem_valid = (bev_sem >= 0) if bev_sem is not None else None
+    if bev_sem is not None:
+        bev_sem_f = infill_nearest(bev_sem, sem_valid, INFILL_RADIUS)
+        bev_sem_f[~valid_f] = -1
+        bev_sem_f[~FOV_MASK] = -1
+    else:
+        bev_sem_f = None
+
+    # -- 9. FOV mask ----------------------------------------------------------
     bev_height_f[~FOV_MASK]       = 0.0
     bev_above_ground_f[~FOV_MASK] = 0.0
     bev_slope_f[~FOV_MASK]        = 0.0
     valid_f &= FOV_MASK
 
-    return bev_height_f, bev_above_ground_f, bev_slope_f, valid_f, bev_confidence, bev_sem, bev_feat
+    return bev_height_f, bev_above_ground_f, bev_slope_f, valid_f, bev_confidence, bev_sem_f, bev_feat
 
 
 # -- Main pipeline ------------------------------------------------------------
@@ -591,15 +643,17 @@ def main():
         if args.visualize:
             step = max(1, (end_idx - start_idx) // 5)
             if (i - start_idx) % step == 0:
-                _save_viz(i, bev_height, bev_above_ground, bev_slope, bev_valid, bev_confidence)
+                _save_viz(i, bev_height, bev_above_ground, bev_slope, bev_valid, bev_confidence, bev_sem)
 
 
-def _save_viz(idx, height, above_ground, slope, valid, confidence):
+def _save_viz(idx, height, above_ground, slope, valid, confidence, sem=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
 
-    fig, axes = plt.subplots(1, 5, figsize=(25, 5))
+    n_panels = 6 if sem is not None else 5
+    fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 5))
 
     im0 = axes[0].imshow(np.where(valid, height, np.nan), cmap="terrain", aspect="equal")
     axes[0].set_title("Ground Height (m)")
@@ -622,6 +676,18 @@ def _save_viz(idx, height, above_ground, slope, valid, confidence):
         cmap="gray", vmin=0, vmax=1, aspect="equal"
     )
     axes[4].set_title(f"Valid ({valid.sum()}/{FOV_MASK.sum()})")
+
+    if sem is not None:
+        sem_valid = valid & (sem >= 0)
+        rgb = _sem_to_rgb(sem, sem_valid)
+        axes[5].imshow(rgb, aspect="equal")
+        axes[5].set_title("Semantics")
+        present = sorted({int(c) for c in sem[sem_valid]} if sem_valid.any() else [])
+        legend = [Patch(facecolor=SEM_COLORS[c], label=SEM_CLASSES[c])
+                  for c in present if c < len(SEM_CLASSES)]
+        if legend:
+            axes[5].legend(handles=legend, loc="lower right", fontsize=6,
+                           framealpha=0.7, ncol=2)
 
     for ax in axes:
         ax.set_xlabel("Lateral (Y)")
