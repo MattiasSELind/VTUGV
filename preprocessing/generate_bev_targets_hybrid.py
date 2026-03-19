@@ -281,6 +281,30 @@ def infill_nearest(grid, valid, radius):
     return out
 
 
+def _idw_weights(valid, radius, power=IDW_POWER):
+    """
+    Compute per-cell IDW numerator weights and denominator for a given validity mask.
+    Returns (num_weights, den) where num_weights has the same shape as valid and
+    den[r,c] is the total weight from valid neighbours within radius of (r,c).
+    Shared by infill_idw and infill_idw_nd so weights are only computed once.
+    """
+    dist = ndimage.distance_transform_edt(~valid)
+    fill = (~valid) & (dist <= radius)
+    den  = np.zeros((BEV_RES, BEV_RES), dtype=np.float64)
+    for dr in range(-radius, radius + 1):
+        for dc in range(-radius, radius + 1):
+            d = np.sqrt(dr * dr + dc * dc)
+            if d < 1e-6 or d > radius:
+                continue
+            w    = 1.0 / (d ** power)
+            s_r0 = max(0, -dr); s_r1 = min(BEV_RES, BEV_RES - dr)
+            s_c0 = max(0, -dc); s_c1 = min(BEV_RES, BEV_RES - dc)
+            d_r0 = s_r0 + dr;   d_r1 = s_r1 + dr
+            d_c0 = s_c0 + dc;   d_c1 = s_c1 + dc
+            den[d_r0:d_r1, d_c0:d_c1] += w * valid[s_r0:s_r1, s_c0:s_c1].astype(np.float64)
+    return fill, den
+
+
 def infill_idw(grid, valid, radius, power=IDW_POWER):
     """
     Inverse-distance weighted infill for invalid cells within `radius` cells of
@@ -288,19 +312,16 @@ def infill_idw(grid, valid, radius, power=IDW_POWER):
     """
     if valid.all() or not valid.any():
         return grid.copy()
-    dist    = ndimage.distance_transform_edt(~valid)
-    fill    = (~valid) & (dist <= radius)
+    fill, den = _idw_weights(valid, radius, power)
     if not fill.any():
         return grid.copy()
     num = np.zeros((BEV_RES, BEV_RES), dtype=np.float64)
-    den = np.zeros((BEV_RES, BEV_RES), dtype=np.float64)
     for dr in range(-radius, radius + 1):
         for dc in range(-radius, radius + 1):
             d = np.sqrt(dr * dr + dc * dc)
             if d < 1e-6 or d > radius:
                 continue
-            w   = 1.0 / (d ** power)
-            # Source slice [s_r0:s_r1, s_c0:s_c1] -> dest slice offset by (dr, dc)
+            w    = 1.0 / (d ** power)
             s_r0 = max(0, -dr); s_r1 = min(BEV_RES, BEV_RES - dr)
             s_c0 = max(0, -dc); s_c1 = min(BEV_RES, BEV_RES - dc)
             d_r0 = s_r0 + dr;   d_r1 = s_r1 + dr
@@ -308,10 +329,40 @@ def infill_idw(grid, valid, radius, power=IDW_POWER):
             sv = valid[s_r0:s_r1, s_c0:s_c1].astype(np.float64)
             sg = grid [s_r0:s_r1, s_c0:s_c1].astype(np.float64)
             num[d_r0:d_r1, d_c0:d_c1] += w * sv * sg
-            den[d_r0:d_r1, d_c0:d_c1] += w * sv
     out = grid.copy()
     has = fill & (den > 0)
     out[has] = (num[has] / den[has]).astype(grid.dtype)
+    return out
+
+
+def infill_idw_nd(grid, valid, radius, power=IDW_POWER):
+    """
+    IDW infill for a (BEV_RES, BEV_RES, D) feature grid.
+    IDW weights are shared across all D channels — one set of NumPy passes.
+    """
+    if valid.all() or not valid.any():
+        return grid.copy()
+    fill, den = _idw_weights(valid, radius, power)
+    if not fill.any():
+        return grid.copy()
+    D   = grid.shape[2]
+    num = np.zeros((BEV_RES, BEV_RES, D), dtype=np.float64)
+    for dr in range(-radius, radius + 1):
+        for dc in range(-radius, radius + 1):
+            d = np.sqrt(dr * dr + dc * dc)
+            if d < 1e-6 or d > radius:
+                continue
+            w    = 1.0 / (d ** power)
+            s_r0 = max(0, -dr); s_r1 = min(BEV_RES, BEV_RES - dr)
+            s_c0 = max(0, -dc); s_c1 = min(BEV_RES, BEV_RES - dc)
+            d_r0 = s_r0 + dr;   d_r1 = s_r1 + dr
+            d_c0 = s_c0 + dc;   d_c1 = s_c1 + dc
+            sv = valid[s_r0:s_r1, s_c0:s_c1].astype(np.float64)        # (h, w)
+            sg = grid [s_r0:s_r1, s_c0:s_c1].astype(np.float64)        # (h, w, D)
+            num[d_r0:d_r1, d_c0:d_c1] += w * sv[:, :, None] * sg
+    out = grid.copy()
+    has = fill & (den > 0)
+    out[has] = (num[has] / den[has][:, None]).astype(grid.dtype)
     return out
 
 
@@ -520,22 +571,29 @@ def points_to_bev(pts_ego, source=None, sem_img=None, feat_map=None):
     bev_above_ground_f[~valid_f] = 0.0
     bev_slope_f[~valid_f]        = 0.0
 
-    # -- 8. Semantic nearest-neighbour infill (categorical — no averaging) ----
-    sem_valid = (bev_sem >= 0) if bev_sem is not None else None
+    # -- 8. Feature IDW infill (multi-channel, same spatial weights) ----------
+    if bev_feat is not None:
+        bev_feat_f = infill_idw_nd(bev_feat, bev_valid, INFILL_RADIUS)
+        bev_feat_f[~valid_f] = 0.0
+        bev_feat_f[~FOV_MASK] = 0.0
+    else:
+        bev_feat_f = None
+
+    # -- 10. Semantic nearest-neighbour infill (categorical — no averaging) ---
     if bev_sem is not None:
-        bev_sem_f = infill_nearest(bev_sem, sem_valid, INFILL_RADIUS)
-        bev_sem_f[~valid_f] = -1
+        bev_sem_f = infill_nearest(bev_sem, bev_sem >= 0, INFILL_RADIUS)
+        bev_sem_f[~valid_f]  = -1
         bev_sem_f[~FOV_MASK] = -1
     else:
         bev_sem_f = None
 
-    # -- 9. FOV mask ----------------------------------------------------------
+    # -- 11. FOV mask ---------------------------------------------------------
     bev_height_f[~FOV_MASK]       = 0.0
     bev_above_ground_f[~FOV_MASK] = 0.0
     bev_slope_f[~FOV_MASK]        = 0.0
     valid_f &= FOV_MASK
 
-    return bev_height_f, bev_above_ground_f, bev_slope_f, valid_f, bev_confidence, bev_sem_f, bev_feat
+    return bev_height_f, bev_above_ground_f, bev_slope_f, valid_f, bev_confidence, bev_sem_f, bev_feat_f
 
 
 # -- Main pipeline ------------------------------------------------------------
