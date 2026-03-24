@@ -55,12 +55,12 @@ print(f"Keys: {list(sample.keys())}")
 for k in sample:
     print(f"  {k}: {sample[k].shape} {sample[k].dtype}")
 
-has_sem  = "bev_semantics"   in sample
-has_conf = "bev_confidence"  in sample
-has_ag   = "bev_above_ground" in sample
+has_sem       = "bev_semantics"  in sample
+has_conf      = "bev_confidence" in sample
+has_clearance = "bev_clearance"  in sample
 
 # Build column list dynamically based on available keys
-cols = ["Height (m)", "Slope (°)", "Above Ground (m)"] if has_ag else ["Height (m)", "Slope (°)"]
+cols = ["Height (m)", "Slope (°)", "Clearance (m)"] if has_clearance else ["Height (m)", "Slope (°)"]
 if has_conf:
     cols.append("Ground Pt Count")
 if has_sem:
@@ -109,11 +109,11 @@ for row, fp in enumerate(files):
     add_grid(axes[row, col])
     col += 1
 
-    # Above ground
-    if has_ag:
-        ag = d["bev_above_ground"].astype(float)
+    # Clearance
+    if has_clearance:
+        ag = d["bev_clearance"].astype(float)
         ag[~fov] = np.nan
-        im = axes[row, col].imshow(ag, cmap="hot", vmin=0, vmax=3, extent=EXTENT, aspect="equal", interpolation="nearest")
+        im = axes[row, col].imshow(ag, cmap="viridis", vmin=0, vmax=3, extent=EXTENT, aspect="equal", interpolation="nearest")
         plt.colorbar(im, ax=axes[row, col], fraction=.04, pad=.04)
         add_grid(axes[row, col])
         col += 1
